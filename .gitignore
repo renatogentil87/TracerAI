@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.zip
+.aws-sam/
+cdk.out/
+.env
+.DS_Store

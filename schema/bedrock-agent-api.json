@@ -1,0 +1,48 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "TracerAI API",
+    "version": "0.1.0",
+    "description": "Read-only AWS networking troubleshooting tools for the TracerAI Bedrock Agent."
+  },
+  "paths": {
+    "/troubleshoot-vpc-connectivity": {
+      "post": {
+        "operationId": "troubleshootVpcConnectivity",
+        "summary": "Diagnose why two VPCs cannot connect",
+        "description": "Gathers read-only route table and security group configuration for a source and target VPC so the agent can reason about connectivity failures.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["sourceVpcId", "targetVpcId"],
+                "properties": {
+                  "sourceVpcId": {
+                    "type": "string",
+                    "description": "The source VPC ID, e.g. vpc-0abc123."
+                  },
+                  "targetVpcId": {
+                    "type": "string",
+                    "description": "The target VPC ID, e.g. vpc-0def456."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Route tables and security groups for both VPCs.",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object" }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
