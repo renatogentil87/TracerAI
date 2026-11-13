@@ -1,6 +1,6 @@
 # M0 needs only boto3:
 boto3
 
-# M1 adds Strands. VERIFY the exact package name in the current Strands docs
-# before installing — this is a best-guess placeholder, not confirmed:
-# strands-agents
+# M1 — Strands Agents SDK (verified package names):
+strands-agents
+strands-agents-tools
