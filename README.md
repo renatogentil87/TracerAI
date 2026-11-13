@@ -1,47 +1,61 @@
 # TracerAI
 
-**TracerAI** is an AI-powered AWS networking troubleshooting agent. It runs on **Amazon Bedrock Agents** and uses **AWS Lambda** tools (Python + `boto3`) to perform **read-only** inspection of live network infrastructure — VPCs, subnets, route tables, security groups, and Transit Gateway paths — then reasons about *why* connectivity is failing and explains it in plain language.
+**TracerAI** is an AI-powered AWS networking troubleshooting agent. It is built with the **Strands Agents SDK** (code-first, Python) on **Amazon Bedrock**, and uses **read-only** `boto3` tools to inspect live network infrastructure — starting with **EC2 Reachability Analyzer** — then explains *why* connectivity works or fails in plain language.
 
-> ⚠️ **Proof of Concept** — under active development.
+> ⚠️ **Proof of Concept / learning project** — under active development.
 
 ## What it does
 
-Ask a natural-language question like *"Why can't VPC A connect to VPC B?"* and TracerAI reasons about the problem, calls the right read-only AWS APIs to gather the relevant configuration, and returns a diagnosis (e.g., a missing route, a blackhole, a security-group gap).
+Ask a natural-language question like *"Can instance A reach instance B on port 3306?"* The agent calls the right read-only AWS API (Reachability Analyzer), reads the structured result, and returns a diagnosis (reachable or not, and *why* — e.g. a security-group mismatch or a missing route).
 
-## Architecture
+## Architecture (Strands, code-first)
 
-![TracerAI Architecture](docs/architecture.png)
+The agent loop runs **in your Python process** — no managed Bedrock Agent, no Lambda, no OpenAPI schema required to run locally:
 
-The PoC follows a clean layered flow:
+1. **CLI / entry point** — you ask a question (`python -m tracerai.agent`).
+2. **Strands Agent** — the orchestrator. It uses a Bedrock model to decide which tool to call.
+3. **Tools (`tracerai/tools/`)** — plain `boto3` functions (the "hands"). Each is independently testable without the LLM.
+4. **AWS (read-only)** — the tools run analysis/describe APIs against the target account via a read-only role.
 
-1. **User Interface** — where a network engineer interacts with TracerAI (the Amazon Bedrock console, a custom web app, or a CLI).
-2. **Bedrock Agent Core (TracerAI)** — the "brain." It receives the natural-language query, uses an LLM to reason about the problem, and decides which tools are needed to gather information.
-3. **Action Group (AWS Lambda)** — the "hands." The Agent Core invokes a specific Lambda function (e.g., `TroubleshootVPCConnectivity`).
-4. **Tools (Python / boto3)** — the Lambda contains the Python code, which uses the `boto3` SDK to execute **read-only** AWS API calls against the target infrastructure (e.g., `DescribeRouteTables`, `DescribeSecurityGroups`).
-5. **API Gateway (Schema)** — defines the interface (the OpenAPI schema) between the Bedrock Agent and the Lambda tools, telling the Agent what functions are available and what parameters they require.
+> **Deployment (later):** Strands agents can be hosted on Bedrock AgentCore Runtime, Lambda, or Fargate. That is a *later* step — development starts local.
 
-This matches the PoC stage: one reasoning agent, one example tool, one schema.
-
-## Repository Layout
+## Repository layout
 
 | Path | Purpose |
 |------|---------|
-| `lambdas/` | Python Lambda functions that act as agent tools (one folder per tool) |
-| `lambdas/troubleshoot_vpc/` | Example tool — VPC connectivity checks (routes, SGs) |
-| `schema/bedrock-agent-api.json` | OpenAPI schema defining the tools Bedrock can invoke |
-| `docs/` | Documentation and architecture diagrams |
+| `tracerai/` | Python package (the agent) |
+| `tracerai/tools/reachability.py` | **M0** — Reachability Analyzer tool (plain boto3, runnable standalone) |
+| `tracerai/agent.py` | **M1** — wires the tool into a Strands agent |
+| `requirements.txt` | Dependencies (boto3; Strands added at M1) |
+| `docs/` | Architecture diagram and notes |
+| `lambdas/`, `schema/` | **Legacy** — scaffolding from the earlier Bedrock-Agents approach; not used by the Strands build (safe to delete) |
 
-## Getting Started
+## Milestones
 
-_Setup and deployment documentation coming soon._ It will cover:
+| | Goal |
+|---|------|
+| **M0** | `reachability(src, dst, port)` works standalone and returns a clean result dict |
+| **M1** | Strands agent answers one question end-to-end by calling the tool |
+| **M2** | Resolve friendly names → instance IDs (add a describe-instances tool) |
+| **M3** | Interpret ExplanationCodes into plain-English remediation |
+| **M4** | Add a second tool (e.g. describe-security-groups) for deeper analysis |
 
-- Deploying the Lambda tool(s) in `lambdas/`
-- Registering the Bedrock Agent **action group** against `schema/bedrock-agent-api.json`
-- The IAM read-only permissions the Lambda execution role needs (`ec2:Describe*`, etc.)
+## Getting started
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install boto3
+
+# M0 — run the tool directly (no AI yet):
+python tracerai/tools/reachability.py
+```
+Point your shell at a **Bedrock-allowed sandbox account / read-only role** before running. For M1, install the Strands package (**verify the exact name in the current Strands docs**) and run `python -m tracerai.agent`.
 
 ## Security
 
-All AWS API calls are **read-only** by design (describe/get/list). The Lambda execution role should be scoped to read-only networking permissions — TracerAI diagnoses, it never mutates infrastructure.
+All AWS calls are **read-only / analysis** by design. The agent's role needs only:
+`ec2:CreateNetworkInsightsPath`, `ec2:StartNetworkInsightsAnalysis`, `ec2:DescribeNetworkInsightsAnalyses`, `ec2:DeleteNetworkInsightsPath` (cleanup), and `ec2:Describe*`. **No mutating network permissions** — TracerAI diagnoses, it never changes infrastructure.
 
 ## License
 
