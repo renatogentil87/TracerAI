@@ -1,73 +1,95 @@
 """
-M1 — the Strands agent. Run AFTER tracerai/tools/reachability.py works.
+TracerAI agent (M2).
 
-Install (verified package names):
-    pip install strands-agents strands-agents-tools
+Two tools now:
+  - resolve_instance : friendly Name tag -> instance id
+  - check_reachability : can A reach B on a port (EC2 Reachability Analyzer)
+
+The model chains them: resolve names first, then check reachability.
 
 Run:
     python -m tracerai.agent
 """
 
-# `Agent` is the orchestrator (owns the loop + model I/O).
-# `tool` is the decorator that turns a plain function into something the model
-# can call. Strands reads the function's TYPE HINTS (parameter schema) and its
-# DOCSTRING (what the tool does / when to use it) — so both matter.
 from strands import Agent, tool
-
-# Optional: a specific Bedrock model. Omit `model=` entirely to use the Strands
-# default (a Claude model on Bedrock). Shown here so you see where it goes.
 from strands.models import BedrockModel
 
 from tracerai.tools.reachability import reachability
+from tracerai.tools.instances import resolve_instance as _resolve_instance
+
+
+@tool
+def resolve_instance(name: str) -> dict:
+    """Resolve an EC2 instance by its Name tag to an instance id.
+
+    Use this FIRST when the user refers to an instance by a friendly name
+    (e.g. "the web server", "database") rather than an i-xxxx id. Returns
+    `matches` (all instances with that Name) and `resolved_id` (set only when
+    there is exactly one running match). If there are multiple matches, ask the
+    user which one they mean before continuing.
+
+    Args:
+        name: the instance's Name tag, or a raw instance id.
+    """
+    return _resolve_instance(name)
 
 
 @tool
 def check_reachability(src_id: str, dst_id: str, port: int) -> dict:
     """Check whether one EC2 instance can reach another over TCP on a port.
 
-    Use this whenever the user asks if one resource can connect to / reach /
-    talk to another, or why a connection is failing.
+    Requires raw instance ids (i-xxxx). If the user gave friendly names, call
+    resolve_instance for each FIRST to get the ids.
 
     Args:
-        src_id: the SOURCE EC2 instance id, e.g. "i-0abc..."
-        dst_id: the DESTINATION EC2 instance id, e.g. "i-0def..."
-        port:   the destination TCP port, e.g. 3306 for MySQL, 22 for SSH
+        src_id: SOURCE instance id, e.g. "i-0abc..."
+        dst_id: DESTINATION instance id, e.g. "i-0def..."
+        port:   destination TCP port, e.g. 3306 (MySQL), 22 (SSH)
 
-    Returns a dict with `reachable` (bool), `reason_codes` (why, if blocked),
-    and `path_summary` (the hops the traffic would take).
+    Returns `reachable` (bool), `reason_codes` (why, if blocked), and
+    `path_summary` (the hops traffic would take).
     """
-    # The @tool wrapper is intentionally thin: it just calls your tested M0
-    # function. Keep tools dumb; keep the real logic in tools/.
     return reachability(src_id, dst_id, port)
 
 
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
-When the user asks whether resources can connect, call check_reachability with
-the instance IDs and port, then explain the result in plain English:
-- say clearly whether it is reachable,
-- if it is blocked, name the reason from reason_codes in human terms
-  (e.g. ENI_SG_RULES_MISMATCH = a security group doesn't allow that port),
-- suggest the most likely fix.
-Only answer from tool results. If you are missing an instance ID or port, ask."""
+
+When the user asks whether resources can connect:
+1. If they named an instance by a friendly name (not an i-xxxx id), call
+   resolve_instance to get its id. Do this for BOTH source and destination.
+   - If resolve_instance returns multiple matches, ask the user which one.
+   - If it returns no matches, tell the user you couldn't find that instance.
+2. Once you have both ids, call check_reachability with the port
+   (infer common ports from service names: SSH=22, MySQL=3306, HTTPS=443).
+3. Explain the result in plain English:
+   - say clearly whether it is reachable,
+   - if blocked, translate reason_codes into human terms
+     (e.g. ENI_SG_RULES_MISMATCH = a security group doesn't allow that port),
+   - suggest the most likely fix.
+
+Only answer from tool results. If you are missing a name or port, ask."""
 
 
 def build_agent() -> Agent:
-    # Pick a model enabled in YOUR Bedrock-allowed account. Swap this id for one
-    # you have model access to, or delete `model=` to take the Strands default.
-    # Claude Sonnet 5.5 — verified ACTIVE in ca-central-1 under rrdog-terraform.
-    # This model is INFERENCE_PROFILE-only, so we use the profile id (not the
-    # bare "anthropic.claude-sonnet-5-5", which cannot be invoked directly).
-    model = BedrockModel(model_id="us.anthropic.claude-sonnet-5-5")
-
+    model = BedrockModel(
+        model_id="us.anthropic.claude-sonnet-4-6",
+        region_name="ca-central-1",
+    )
     return Agent(
         model=model,
-        tools=[check_reachability],
+        tools=[resolve_instance, check_reachability],
         system_prompt=SYSTEM_PROMPT,
     )
 
 
 if __name__ == "__main__":
     agent = build_agent()
-    # Calling the agent with a string runs the full loop and prints/returns the
-    # final answer. Replace with real instance IDs you own.
-    agent("Can i-REPLACE_SRC reach i-REPLACE_DST on port 22?")
+    print("TracerAI — ask a network question (type 'quit' to exit).")
+    while True:
+        try:
+            question = input("\nAsk TracerAI: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not question or question.lower() in ("quit", "exit"):
+            break
+        agent(question)
