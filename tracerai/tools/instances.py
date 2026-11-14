@@ -1,9 +1,5 @@
-"""
-M2 tool — resolve a friendly EC2 "Name" tag to an instance id, so the agent can
-answer questions like "can the web server reach the database?" instead of
-requiring raw i-xxxx ids.
+"""Resolve an EC2 Name tag to an instance id.
 
-Plain boto3, independently testable:
     python tracerai/tools/instances.py
 """
 
@@ -11,30 +7,25 @@ import boto3
 
 
 def resolve_instance(name: str) -> dict:
-    """Resolve an EC2 instance by its Name tag (or by raw instance id).
+    """Resolve an EC2 instance by its Name tag, or pass through a raw id.
 
     Args:
-        name: the value of the instance's "Name" tag (e.g. "web-server"),
-              or a raw instance id like "i-0abc..." (returned as-is if it
-              already looks like an id).
+        name: the instance's "Name" tag value (e.g. "web-server"), or a raw
+            instance id like "i-0abc..." (returned as-is).
 
-    Returns a clean dict:
+    Returns:
         {
-          "matches": [
-            {"instance_id": "i-...", "name": "web-server", "state": "running"},
-            ...
-          ],
-          "resolved_id": "i-..."  # set only when exactly ONE running match
+          "matches": [{"instance_id": "i-...", "name": "web-server", "state": "running"}],
+          "resolved_id": "i-..."  # set only when exactly one running match
         }
-    The agent should ask the user to disambiguate when matches has more than one
-    entry, and should treat resolved_id as the id to pass to reachability().
     """
     ec2 = boto3.client("ec2")
 
-    # If it already looks like an instance id, don't bother searching.
     if name.startswith("i-"):
-        return {"matches": [{"instance_id": name, "name": None, "state": None}],
-                "resolved_id": name}
+        return {
+            "matches": [{"instance_id": name, "name": None, "state": None}],
+            "resolved_id": name,
+        }
 
     resp = ec2.describe_instances(
         Filters=[{"Name": "tag:Name", "Values": [name]}],
@@ -61,5 +52,5 @@ def resolve_instance(name: str) -> dict:
 
 if __name__ == "__main__":
     import json
-    # Replace with a Name tag that exists in your account:
+
     print(json.dumps(resolve_instance("REPLACE_WITH_NAME_TAG"), indent=2))

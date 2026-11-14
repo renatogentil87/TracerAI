@@ -1,6 +1,3 @@
-# M0 needs only boto3:
 boto3
-
-# M1 — Strands Agents SDK (verified package names):
 strands-agents
 strands-agents-tools
