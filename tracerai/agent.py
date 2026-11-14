@@ -54,7 +54,10 @@ Only answer from tool results. If you are missing an instance ID or port, ask.""
 def build_agent() -> Agent:
     # Pick a model enabled in YOUR Bedrock-allowed account. Swap this id for one
     # you have model access to, or delete `model=` to take the Strands default.
-    model = BedrockModel(model_id="anthropic.claude-3-5-sonnet-20240620-v1:0")
+    # Claude Sonnet 5.5 — verified ACTIVE in ca-central-1 under rrdog-terraform.
+    # This model is INFERENCE_PROFILE-only, so we use the profile id (not the
+    # bare "anthropic.claude-sonnet-5-5", which cannot be invoked directly).
+    model = BedrockModel(model_id="us.anthropic.claude-sonnet-5-5")
 
     return Agent(
         model=model,
