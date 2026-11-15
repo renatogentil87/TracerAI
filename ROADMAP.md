@@ -106,6 +106,41 @@ So TracerAI should not flatly call this a missing route. Planned improvements:
 - When inspection is in play, describe the expected flow (source to Transit Gateway to
   inspection firewall to destination and back) rather than treating it as broken.
 
+## Full path review for a TGW, Cloud WAN, and firewall network
+
+The north star. For a network like mine (Transit Gateway peered with Cloud WAN, with a
+central inspection firewall), I want to ask one question like "why can't A reach B?" and
+have TracerAI walk the entire path and tell me where it breaks, without me pointing it at
+each layer by hand.
+
+To do that it has to read every layer on the path and reason across them:
+
+- Security groups and NACLs on both ends (security groups done, NACLs listed above).
+- Subnet and VPC route tables.
+- Transit Gateway route tables, including which attachment a prefix resolves to and any
+  blackhole.
+- Cloud WAN segment route tables, and whether a segment is actually learning the prefix.
+- Network Firewall rule groups and policy, to see whether the inspected traffic is allowed
+  by a rule, not just routed to the firewall.
+
+Then it chains them into one diagnosis: resolve both ends, run reachability, and for each
+layer on the path confirm the config allows the flow, calling out the first thing that
+blocks it (a missing or blackhole route, a security group or NACL rule, or a firewall rule
+that drops the traffic). It has to understand the send-via firewall path, so when traffic
+is routed to the inspection VPC it checks the firewall policy instead of reporting a
+missing route.
+
+New tools this needs:
+
+- **Network Firewall inspection.** Read the firewall policy and rule groups and say whether
+  a given flow (source, destination, port, protocol) is allowed or dropped.
+- **Cloud WAN route tables.** Read a segment route table and say how a prefix resolves and
+  which edge or attachment it was learned from.
+- **Transit Gateway route tables.** Listed above under hybrid and transit.
+
+This is the capability that makes TracerAI match the work I actually do, troubleshooting a
+TGW, Cloud WAN, and firewall estate end to end instead of answering one layer at a time.
+
 ## How I build each one
 
 Same approach every time. Write a plain boto3 function in `tracerai/tools/`, prove it on
