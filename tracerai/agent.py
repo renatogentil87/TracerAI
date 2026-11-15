@@ -8,6 +8,7 @@ from strands.models import BedrockModel
 
 from tracerai.tools.reachability import reachability
 from tracerai.tools.instances import resolve_instance as _resolve_instance
+from tracerai.banner import print_banner
 
 
 @tool
@@ -72,7 +73,7 @@ def build_agent() -> Agent:
 
 if __name__ == "__main__":
     agent = build_agent()
-    print("TracerAI: ask a network question (type 'quit' to exit).")
+    print_banner()
     while True:
         try:
             question = input("\nAsk TracerAI: ").strip()
