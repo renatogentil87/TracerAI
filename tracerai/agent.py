@@ -15,54 +15,63 @@ from tracerai.banner import print_banner
 
 
 @tool
-def resolve_instance(name: str) -> dict:
+def resolve_instance(name: str, region: str = None) -> dict:
     """Resolve an EC2 instance by its Name tag to an instance id.
 
     Call this when the user refers to an instance by name rather than an
-    i-xxxx id. Returns `matches` (all instances with that Name) and
-    `resolved_id` (set only when there is exactly one running match). Ask the
-    user to pick when there are multiple matches.
+    i-xxxx id. Matching is case insensitive and partial, and several regions
+    are searched when none is given. Returns `matches` (each with its region)
+    and `resolved_id` (set only when there is exactly one running match). When
+    there are multiple matches, ask the user which one. When there are no
+    matches, the result includes `suggestions` (the instances that were found);
+    offer the closest one and ask if that is the one. Note the region of the
+    chosen instance and pass it to the other tools.
 
     Args:
-        name: the instance's Name tag, or a raw instance id.
+        name: a full or partial Name tag, or a raw instance id.
+        region: optional region to narrow the search.
     """
-    return _resolve_instance(name)
+    return _resolve_instance(name, region)
 
 
 @tool
-def check_reachability(src_id: str, dst_id: str, port: int) -> dict:
+def check_reachability(src_id: str, dst_id: str, port: int, region: str = None) -> dict:
     """Check whether one EC2 instance can reach another over TCP on a port.
 
     Requires raw instance ids. Call resolve_instance first for any friendly
-    names.
+    names, and pass the region it reported. Both instances must be in the same
+    region.
 
     Args:
         src_id: source instance id, e.g. "i-0abc..."
         dst_id: destination instance id, e.g. "i-0def..."
         port: destination TCP port, e.g. 3306 (MySQL), 22 (SSH)
+        region: the region both instances live in.
 
     Returns `reachable`, `reason_codes`, and `path_summary`.
     """
-    return reachability(src_id, dst_id, port)
+    return reachability(src_id, dst_id, port, region=region)
 
 
 @tool
-def check_security_group(target: str, port: int = None, protocol: str = "tcp") -> dict:
+def check_security_group(target: str, port: int = None, protocol: str = "tcp", region: str = None) -> dict:
     """Inspect the security group rules for an instance or a security group.
 
     Use this to answer questions like "is security group X allowing port 1010?"
     or "what can reach this instance on 443?", and to explain WHY a reachability
-    check was blocked by a security group.
+    check was blocked by a security group. Pass the region from resolve_instance
+    so the lookup targets the right place.
 
     Args:
         target: an instance id (i-...) or a security group id (sg-...).
         port: optional port to check for inbound access, e.g. 1010.
         protocol: "tcp" (default) or "udp", used with port.
+        region: the region the resource lives in.
 
     Returns the inbound and outbound rules, plus a port_check verdict when a
     port is given.
     """
-    return _describe_security_group(target, port, protocol)
+    return _describe_security_group(target, port, protocol, region=region)
 
 
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
@@ -95,7 +104,16 @@ When to use check_security_group:
 When a port is blocked, state the rule to add: protocol, port, and the source
 CIDR that would allow it.
 
-Only answer from tool results. If you are missing a name or port, ask."""
+Only answer from tool results. If you are missing a name or port, ask.
+
+Style:
+- Keep replies short. State the finding and the next step in a sentence or two.
+- When an instance is not found, do NOT tell the user to check the console or to
+  supply an instance id, and do not print a generic checklist. Instead, look at
+  the suggestions the tool returned and offer the closest one, for example:
+  "I couldn't find prod-instance-a, but I found prod-instance-vpc-a in eu-west-1.
+  Is that the one?"
+- Do not use emojis."""
 
 
 def build_agent() -> Agent:
@@ -133,6 +151,7 @@ if __name__ == "__main__":
             break
         try:
             agent(question)
+            print()
         except Exception as e:
             message = str(e)
             if "use case details" in message or "ResourceNotFound" in type(e).__name__:

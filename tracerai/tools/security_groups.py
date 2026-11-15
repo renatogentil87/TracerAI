@@ -6,7 +6,7 @@
 import boto3
 
 
-def describe_security_group(target: str, port: int = None, protocol: str = "tcp") -> dict:
+def describe_security_group(target: str, port: int = None, protocol: str = "tcp", region: str = None) -> dict:
     """Return the security group rules for an instance or a security group.
 
     Args:
@@ -15,6 +15,8 @@ def describe_security_group(target: str, port: int = None, protocol: str = "tcp"
         port: optional. When given, the result also says whether that inbound
             port is allowed and which rules matched.
         protocol: "tcp" (default) or "udp". Only used with port.
+        region: optional region the resource lives in. Pass the region from
+            resolve_instance so the lookup targets the right place.
 
     Returns:
         {
@@ -32,7 +34,7 @@ def describe_security_group(target: str, port: int = None, protocol: str = "tcp"
                          "allowed_inbound": False, "matched": []}   # only if port given
         }
     """
-    ec2 = boto3.client("ec2")
+    ec2 = boto3.client("ec2", region_name=region) if region else boto3.client("ec2")
 
     # Work out which security groups to look at.
     if target.startswith("sg-"):

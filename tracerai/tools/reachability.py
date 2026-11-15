@@ -7,7 +7,7 @@ import time
 import boto3
 
 
-def reachability(src_id: str, dst_id: str, port: int, protocol: str = "tcp") -> dict:
+def reachability(src_id: str, dst_id: str, port: int, protocol: str = "tcp", region: str = None) -> dict:
     """Return whether src_id can reach dst_id on the given port.
 
     Args:
@@ -15,6 +15,7 @@ def reachability(src_id: str, dst_id: str, port: int, protocol: str = "tcp") -> 
         dst_id: destination instance id
         port: destination port, e.g. 3306
         protocol: "tcp" (default) or "udp"
+        region: optional region. Both instances must be in the same region.
 
     Returns:
         {
@@ -24,7 +25,7 @@ def reachability(src_id: str, dst_id: str, port: int, protocol: str = "tcp") -> 
           "analysis_id": "nia-...",
         }
     """
-    ec2 = boto3.client("ec2")
+    ec2 = boto3.client("ec2", region_name=region) if region else boto3.client("ec2")
     path_id = None
 
     try:
