@@ -8,6 +8,7 @@ from strands.models import BedrockModel
 
 from tracerai.tools.reachability import reachability
 from tracerai.tools.instances import resolve_instance as _resolve_instance
+from tracerai.tools.security_groups import describe_security_group as _describe_security_group
 from tracerai.banner import print_banner
 
 
@@ -43,6 +44,25 @@ def check_reachability(src_id: str, dst_id: str, port: int) -> dict:
     return reachability(src_id, dst_id, port)
 
 
+@tool
+def check_security_group(target: str, port: int = None, protocol: str = "tcp") -> dict:
+    """Inspect the security group rules for an instance or a security group.
+
+    Use this to answer questions like "is security group X allowing port 1010?"
+    or "what can reach this instance on 443?", and to explain WHY a reachability
+    check was blocked by a security group.
+
+    Args:
+        target: an instance id (i-...) or a security group id (sg-...).
+        port: optional port to check for inbound access, e.g. 1010.
+        protocol: "tcp" (default) or "udp", used with port.
+
+    Returns the inbound and outbound rules, plus a port_check verdict when a
+    port is given.
+    """
+    return _describe_security_group(target, port, protocol)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 
 When the user asks whether resources can connect:
@@ -53,8 +73,12 @@ When the user asks whether resources can connect:
    (infer common ports from service names: SSH=22, MySQL=3306, HTTPS=443).
 3. Explain the result in plain English: whether it is reachable, and if
    blocked, translate reason_codes into human terms (for example
-   ENI_SG_RULES_MISMATCH means a security group does not allow that port)
-   and suggest the most likely fix.
+   ENI_SG_RULES_MISMATCH means a security group does not allow that port).
+   When a security group is the likely cause, call check_security_group on the
+   destination to find the exact rule, then suggest the specific fix.
+
+You can also answer direct security group questions (for example "is sg-123
+allowing port 1010?") by calling check_security_group with a port.
 
 Only answer from tool results. If you are missing a name or port, ask."""
 
@@ -66,7 +90,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability],
+        tools=[resolve_instance, check_reachability, check_security_group],
         system_prompt=SYSTEM_PROMPT,
     )
 
