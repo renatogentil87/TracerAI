@@ -10,6 +10,7 @@ from strands.models import BedrockModel
 
 from tracerai.tools.reachability import reachability
 from tracerai.tools.instances import resolve_instance as _resolve_instance
+from tracerai.tools.instances import list_instances as _list_instances
 from tracerai.tools.security_groups import describe_security_group as _describe_security_group
 from tracerai.banner import print_banner
 
@@ -74,6 +75,23 @@ def check_security_group(target: str, port: int = None, protocol: str = "tcp", r
     return _describe_security_group(target, port, protocol, region=region)
 
 
+@tool
+def list_instances(region: str = None) -> dict:
+    """List all EC2 instances in a region (paginated).
+
+    Use this when the user asks to list or show their instances. If the user
+    does not give a region, ask which region first; do not guess. The result
+    sets needs_region when no region was provided.
+
+    Args:
+        region: the AWS region to list instances in, e.g. "eu-west-1".
+
+    Returns the region, a count, and the instances (id, name, state, type,
+    private_ip, az).
+    """
+    return _list_instances(region)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 
 When the user asks whether resources can connect:
@@ -90,6 +108,12 @@ When the user asks whether resources can connect:
 
 You can also answer direct security group questions (for example "is sg-123
 allowing port 1010?") by calling check_security_group with a port.
+
+Listing instances:
+- When the user asks to list or show instances, call list_instances. If they did
+  not give a region, ask which region first; do not guess.
+- After listing, ask: "Do you want to test connectivity between any of these
+  instances?"
 
 When to use check_security_group:
 - Any time check_reachability comes back not reachable with a security group
@@ -123,7 +147,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances],
         system_prompt=SYSTEM_PROMPT,
     )
 

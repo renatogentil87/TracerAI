@@ -67,6 +67,41 @@ def resolve_instance(name: str, region: str = None) -> dict:
     return result
 
 
+def list_instances(region: str = None) -> dict:
+    """List all EC2 instances in a region, paginated.
+
+    Args:
+        region: the region to list. Required. When not given, the result sets
+            needs_region so the caller can ask the user which region.
+
+    Returns:
+        {"region": "...", "count": N, "instances": [
+            {"instance_id", "name", "state", "type", "private_ip", "az"} ]}
+        or {"needs_region": True} when no region was provided.
+    """
+    if not region:
+        return {"needs_region": True}
+
+    ec2 = boto3.client("ec2", region_name=region)
+    instances = []
+    for page in ec2.get_paginator("describe_instances").paginate():
+        for reservation in page.get("Reservations", []):
+            for inst in reservation.get("Instances", []):
+                name_tag = next(
+                    (t["Value"] for t in inst.get("Tags", []) if t["Key"] == "Name"),
+                    None,
+                )
+                instances.append({
+                    "instance_id": inst["InstanceId"],
+                    "name": name_tag,
+                    "state": inst["State"]["Name"],
+                    "type": inst.get("InstanceType"),
+                    "private_ip": inst.get("PrivateIpAddress"),
+                    "az": inst.get("Placement", {}).get("AvailabilityZone"),
+                })
+    return {"region": region, "count": len(instances), "instances": instances}
+
+
 if __name__ == "__main__":
     import json
 
