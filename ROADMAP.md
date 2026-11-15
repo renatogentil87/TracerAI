@@ -84,6 +84,28 @@ Suggest the actual fix, not just the blocking reason. Handle follow up questions
 "now check the reverse direction." And fail gracefully when an instance or name cannot be
 found, with a message that tells me what to try instead.
 
+## Interpret results in the context of centralized inspection
+
+This one came out of a real run. I asked whether prod-instance-vpc-a could reach
+nonprod-instance-vpc-b, and Reachability Analyzer returned TGW_RTB_ROUTES_ARE_UNKNOWN,
+which TracerAI reported as a missing Transit Gateway route. That is misleading in my
+network. The Transit Gateway is deliberately sending the traffic to a central inspection
+firewall, which inspects it and returns it, so the source route table points at the
+inspection VPC on purpose. What looks like a missing route is actually the send-via
+firewall path. Reachability Analyzer also cannot always see a Transit Gateway route table
+that lives in another account, which produces the same code.
+
+So TracerAI should not flatly call this a missing route. Planned improvements:
+
+- Teach the agent that TGW_RTB_ROUTES_ARE_UNKNOWN (and similar "no route" findings) can
+  mean traffic is being inspected and returned, not dropped. Caveat it instead of
+  asserting a gap, and never recommend a route that would bypass the firewall.
+- Add tools to read the Transit Gateway route tables and the firewall policy, so the
+  agent can confirm whether traffic is being sent to an inspection VPC and returned, and
+  explain that path.
+- When inspection is in play, describe the expected flow (source to Transit Gateway to
+  inspection firewall to destination and back) rather than treating it as broken.
+
 ## How I build each one
 
 Same approach every time. Write a plain boto3 function in `tracerai/tools/`, prove it on
