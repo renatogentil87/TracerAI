@@ -3,6 +3,8 @@
     python -m tracerai.agent
 """
 
+import boto3
+
 from strands import Agent, tool
 from strands.models import BedrockModel
 
@@ -80,12 +82,25 @@ When the user asks whether resources can connect:
 You can also answer direct security group questions (for example "is sg-123
 allowing port 1010?") by calling check_security_group with a port.
 
+When to use check_security_group:
+- Any time check_reachability comes back not reachable with a security group
+  cause (for example ENI_SG_RULES_MISMATCH), call check_security_group on the
+  destination for the tested port before you answer. Do not just say "it is
+  probably the security group" without checking.
+- Any time the user asks about ports, allowed sources, or inbound or outbound
+  rules (for example "is port 1010 open?", "what can reach this on 443?").
+- Any time the user suspects the security group, even if they did not ask for a
+  reachability check.
+- Do not call it when the connection already succeeded.
+When a port is blocked, state the rule to add: protocol, port, and the source
+CIDR that would allow it.
+
 Only answer from tool results. If you are missing a name or port, ask."""
 
 
 def build_agent() -> Agent:
     model = BedrockModel(
-        model_id="us.anthropic.claude-sonnet-4-6",
+        model_id="global.anthropic.claude-sonnet-4-6",
         region_name="ca-central-1",
     )
     return Agent(
@@ -95,9 +110,20 @@ def build_agent() -> Agent:
     )
 
 
+def print_context():
+    """Show which AWS account and region the tools will operate against."""
+    try:
+        account = boto3.client("sts").get_caller_identity()["Account"]
+        region = boto3.session.Session().region_name or "unset"
+        print(f"Operating against account {account} in region {region}.\n")
+    except Exception as e:
+        print(f"[warning] could not determine the AWS identity: {e}\n")
+
+
 if __name__ == "__main__":
     agent = build_agent()
     print_banner()
+    print_context()
     while True:
         try:
             question = input("\nAsk TracerAI: ").strip()
@@ -105,4 +131,14 @@ if __name__ == "__main__":
             break
         if not question or question.lower() in ("quit", "exit"):
             break
-        agent(question)
+        try:
+            agent(question)
+        except Exception as e:
+            message = str(e)
+            if "use case details" in message or "ResourceNotFound" in type(e).__name__:
+                print(
+                    "\n[model not ready] The Bedrock model is still being enabled for "
+                    "this account. Try again in a few minutes.\n"
+                )
+            else:
+                print(f"\n[error] {message}\n")
