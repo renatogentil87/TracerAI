@@ -108,6 +108,54 @@ def _rule_allows(rule, port, protocol):
     return rule["from_port"] <= port <= rule["to_port"]
 
 
+def scan_port(port: int, protocol: str = "tcp", region: str = None) -> dict:
+    """Scan every security group in a region for an open inbound port.
+
+    Answers "is port X open in any security group here". Paginates over all
+    security groups so nothing is missed in a large account.
+
+    Args:
+        port: the inbound port to look for, e.g. 22.
+        protocol: "tcp" (default) or "udp".
+        region: optional region to scan. Pass the region the user named.
+
+    Returns:
+        {
+          "port": 22, "protocol": "tcp", "region": "eu-west-1",
+          "open": True,
+          "matches": [
+            {"group_id": "sg-...", "group_name": "prod-sg",
+             "sources": ["0.0.0.0/0"],
+             "rule": {"protocol": "tcp", "from_port": 22, "to_port": 22,
+                      "sources": ["0.0.0.0/0"]}}
+          ]
+        }
+        When nothing matches, open is False and matches is empty.
+    """
+    ec2 = boto3.client("ec2", region_name=region) if region else boto3.client("ec2")
+
+    matches = []
+    for page in ec2.get_paginator("describe_security_groups").paginate():
+        for g in page.get("SecurityGroups", []):
+            for raw in g.get("IpPermissions", []):
+                rule = _flatten_rule(raw)
+                if _rule_allows(rule, port, protocol):
+                    matches.append({
+                        "group_id": g["GroupId"],
+                        "group_name": g.get("GroupName"),
+                        "sources": rule["sources"],
+                        "rule": rule,
+                    })
+
+    return {
+        "port": port,
+        "protocol": protocol,
+        "region": region,
+        "open": len(matches) > 0,
+        "matches": matches,
+    }
+
+
 if __name__ == "__main__":
     import json
 

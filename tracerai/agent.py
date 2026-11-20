@@ -12,6 +12,8 @@ from tracerai.tools.reachability import reachability
 from tracerai.tools.instances import resolve_instance as _resolve_instance
 from tracerai.tools.instances import list_instances as _list_instances
 from tracerai.tools.security_groups import describe_security_group as _describe_security_group
+from tracerai.tools.security_groups import scan_port as _scan_port
+from tracerai.tools.discovery import discover_network as _discover_network
 from tracerai.banner import print_banner
 
 
@@ -92,6 +94,45 @@ def list_instances(region: str = None) -> dict:
     return _list_instances(region)
 
 
+@tool
+def scan_open_port(port: int, protocol: str = "tcp", region: str = None) -> dict:
+    """Scan every security group in a region for an open inbound port.
+
+    Use this when the user asks whether a port is open anywhere, for example
+    "is port 22 open in any security group in eu-west-1?". It checks all
+    security groups in the region, not one instance. If the user does not give
+    a region, ask which region first; do not guess.
+
+    Args:
+        port: the inbound port to look for, e.g. 22.
+        protocol: "tcp" (default) or "udp".
+        region: the region to scan, e.g. "eu-west-1".
+
+    Returns open (true/false) and, for each match, the group id, group name,
+    and the source CIDRs the port is open to.
+    """
+    return _scan_port(port, protocol, region=region)
+
+
+@tool
+def discover_network(region: str = None) -> dict:
+    """Map the network layout in a region.
+
+    Use this when the user asks to discover or map their network (for example
+    "discovery my network"). It returns the VPCs and their CIDRs, the VPC route
+    tables, security groups, NACLs, Transit Gateway attachments, and Transit
+    Gateway route tables in the region. If the user does not give a region, ask
+    which region first; do not guess.
+
+    Args:
+        region: the AWS region to map, e.g. "eu-west-1".
+
+    Returns a section per resource type (vpcs, route_tables, security_groups,
+    nacls, tgw_attachments, tgw_route_tables, and a cloud_wan placeholder).
+    """
+    return _discover_network(region)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 
 When the user asks whether resources can connect:
@@ -108,6 +149,17 @@ When the user asks whether resources can connect:
 
 You can also answer direct security group questions (for example "is sg-123
 allowing port 1010?") by calling check_security_group with a port.
+
+Scanning for an open port across a region:
+- When the user asks whether a port is open anywhere (for example "is port 22
+  open in any security group in eu-west-1?"), call scan_open_port, not
+  check_security_group. check_security_group is for one instance or one sg;
+  scan_open_port checks every security group in the region.
+- If no region is given, ask which region first; do not guess.
+- Answer plainly: if open is false, say "No, port N is not open in any security
+  group in <region>." If open is true, name each group id and the source it is
+  open to, for example "Yes, sg-abc has port 22 open to 0.0.0.0/0." Call out a
+  0.0.0.0/0 source as open to the whole internet.
 
 Listing instances:
 - When the user asks to list or show instances, call list_instances. If they did
@@ -128,6 +180,14 @@ When to use check_security_group:
 When a port is blocked, state the rule to add: protocol, port, and the source
 CIDR that would allow it.
 
+Network discovery:
+- When the user asks to discover or map their network (for example "discovery my
+  network"), call discover_network. If they did not give a region, ask which
+  region first; do not guess.
+- The result has a section per resource type. Summarize it clearly: list the VPCs
+  with their CIDRs, then the Transit Gateway attachments and route tables, then
+  point to security groups and NACLs. Do not dump the raw JSON.
+
 Only answer from tool results. If you are missing a name or port, ask.
 
 Style:
@@ -147,7 +207,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network],
         system_prompt=SYSTEM_PROMPT,
     )
 
