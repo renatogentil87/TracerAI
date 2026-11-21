@@ -75,16 +75,24 @@ What has to be in place:
 3. **A shared external id**, the same value in the role's trust policy and at run
    time.
 
-Then run with the two cross-account environment variables set:
+Then run with the cross-account environment variables set. "Set" means export
+them in your terminal for the current session, right before you launch the tool
+— they are not permanent. Of the two, only `TRACERAI_EXTERNAL_ID` is required;
+`TRACERAI_ROLE_NAME` is optional and defaults to `TracerAI-ReadOnly`.
 
 ```bash
 export AWS_PROFILE=<trusted-account-profile>
 export AWS_REGION=<region of your Bedrock model>
-export TRACERAI_ROLE_NAME=TracerAI-ReadOnly              # the role to assume
-export TRACERAI_EXTERNAL_ID=<the shared secret>          # matches the template
+# Required: the shared secret; cross-account reads fail without it.
+export TRACERAI_EXTERNAL_ID=<the shared secret>
+# Optional: only if your role is named something other than TracerAI-ReadOnly.
+# export TRACERAI_ROLE_NAME=TracerAI-ReadOnly
 python -m tracerai.agent
 # then: "discover my network in eu-west-1"
 ```
+
+If your trusted-account credentials are an expired SSO session, run
+`aws sso login --profile <trusted-account-profile>` first.
 
 See [`deploy/README.md`](deploy/README.md) for the full runbook and the IAM
 template.

@@ -132,13 +132,16 @@ The role is a global IAM resource, so deploy the StackSet to a **single region**
 
 ## Run TracerAI with cross-account discovery
 
-On the machine running TracerAI, with the trusted account's credentials:
+On the machine running TracerAI, with the trusted account's credentials. Export
+these in your terminal for the current session before launching the tool. Only
+`TRACERAI_EXTERNAL_ID` is required; `TRACERAI_ROLE_NAME` is optional and defaults
+to `TracerAI-ReadOnly`.
 
 ```bash
 export AWS_PROFILE=<trusted-account-profile>   # or AWS_* env vars
 export AWS_REGION=<region of your Bedrock model>
-export TRACERAI_ROLE_NAME=TracerAI-ReadOnly              # matches RoleName
-export TRACERAI_EXTERNAL_ID="$(tr -d '\n' < ~/.tracerai/external_id)"
+export TRACERAI_EXTERNAL_ID="$(tr -d '\n' < ~/.tracerai/external_id)"   # required
+# export TRACERAI_ROLE_NAME=TracerAI-ReadOnly  # optional; only if you renamed the role
 python -m tracerai.agent
 # then: "discover my network in eu-west-1"
 ```
