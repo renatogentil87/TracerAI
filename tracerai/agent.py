@@ -204,6 +204,9 @@ def build_agent() -> Agent:
     model = BedrockModel(
         model_id="global.anthropic.claude-sonnet-4-6",
         region_name="ca-central-1",
+        guardrail_id="0q6mkenp9859",
+        guardrail_version="1",
+        guardrail_trace="enabled",
     )
     return Agent(
         model=model,
