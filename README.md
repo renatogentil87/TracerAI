@@ -136,6 +136,7 @@ python tracerai/tools/security_groups.py
 | `tracerai/tools/instances.py` | Resolve a Name tag to an id, and list instances |
 | `tracerai/tools/security_groups.py` | Inspect security group rules |
 | `tracerai/tools/cross_account.py` | Cross-account network discovery (TGW + Cloud WAN, per-VPC detail) |
+| `tracerai/tools/reachability_trace.py` | Cross-account reachability tracing (endpoint resolution + path walk) |
 | `tracerai/banner.py` | Startup banner |
 | `deploy/` | CloudFormation template + runbook for the cross-account read-only role |
 | `requirements.txt` | Dependencies |

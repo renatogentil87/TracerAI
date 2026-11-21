@@ -22,6 +22,8 @@ from tracerai.tools.cross_account import discover_network as _discover_network
 from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
 from tracerai.tools.cross_account import get_instance_security_groups as _get_instance_security_groups
 from tracerai.tools.cross_account import _account_names
+from tracerai.tools.reachability_trace import resolve_endpoint as _resolve_endpoint
+from tracerai.tools.reachability_trace import trace_cross_account as _trace_cross_account
 from tracerai.banner import print_banner
 
 console = Console()
@@ -71,9 +73,12 @@ def resolve_instance(name: str, region: str = None) -> dict:
 def check_reachability(src_id: str, dst_id: str, port: int, region: str = None) -> dict:
     """Check whether one EC2 instance can reach another over TCP on a port.
 
-    Requires raw instance ids. Call resolve_instance first for any friendly
-    names, and pass the region it reported. Both instances must be in the same
-    region.
+    Use this ONLY when both instances are in the SAME account (it runs EC2
+    Reachability Analyzer, which cannot see another account's route tables). When
+    the source and destination are in different accounts, use trace_cross_account
+    instead. Requires raw instance ids. Call resolve_instance first for any
+    friendly names, and pass the region it reported. Both instances must be in the
+    same region.
 
     Args:
         src_id: source instance id, e.g. "i-0abc..."
@@ -213,6 +218,64 @@ def get_instance_security_groups(instance_id: str, account_id: str = None, regio
     return _get_instance_security_groups(instance_id, account_id=account_id, region=region)
 
 
+@tool
+def resolve_endpoint(identifier: str, account_id: str = None, region: str = None) -> dict:
+    """Resolve an endpoint to its instances and network context, in this or another account.
+
+    Use this for CROSS-ACCOUNT reachability, before trace_cross_account: run it for the source and
+    again for the destination to turn whatever the user has (a Name tag, an instance id, a private
+    IP, or an instance ARN) into a concrete instance with its id, private IP, VPC and subnet. When
+    there are several matches, show them and ask the user which one. When account_id is given, the
+    read-only role is assumed in that account; a region is required.
+
+    Args:
+        identifier: a Name tag (partial, case insensitive), an instance id, a private IP, or an ARN.
+        account_id: the 12-digit account that owns the endpoint (optional; omit for this account).
+        region: the region to search.
+
+    Returns match_count and candidates (each with instance_id, name, private_ip, vpc_id, subnet_id),
+    or an error note if the account's role could not be assumed.
+    """
+    return _resolve_endpoint(identifier, account_id=account_id, region=region)
+
+
+@tool
+def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str = "tcp",
+                        region: str = None, src_account_id: str = None,
+                        dst_account_id: str = None, tgw_account_id: str = None) -> dict:
+    """Trace connectivity between two instances in DIFFERENT accounts (read only, config based).
+
+    Use this instead of check_reachability whenever the source and destination are in different AWS
+    accounts: EC2 Reachability Analyzer cannot see another account's route tables, so it cannot
+    answer cross-account questions. First resolve and confirm BOTH endpoints with resolve_endpoint,
+    and ask the user for the port and protocol if they did not give them. Pass raw instance ids and
+    the account each one is in.
+
+    It walks the path and reports the first layer that blocks it: source security group egress and
+    subnet NACL egress, the source VPC route table, the Transit Gateway route table in the hub
+    account (does it have a route to the destination), destination security group and NACL ingress,
+    and the return path (including the TGW return route, a common asymmetric-routing failure). If the
+    path is routed through an inspection VPC it says so and asks the user to check the firewall
+    policy, since it does not read firewall rules; everything else around it is still checked.
+
+    Args:
+        src_instance_id: the source instance id (resolve it first).
+        dst: the destination instance id (preferred, so its inbound rules are checked) or a private IP.
+        port: the destination TCP/UDP port, e.g. 443.
+        protocol: "tcp" (default) or "udp".
+        region: the region both ends are in.
+        src_account_id: the account that owns the source.
+        dst_account_id: the account that owns the destination.
+        tgw_account_id: the Transit Gateway owner (hub) account; defaults to the destination account.
+
+    Returns findings (each step with pass/fail/unknown/info and detail) and a verdict naming the
+    blocker, or saying the path looks open. Layers it cannot read are reported as unknown, not failed.
+    """
+    return _trace_cross_account(
+        src_instance_id=src_instance_id, dst=dst, port=port, protocol=protocol, region=region,
+        src_account_id=src_account_id, dst_account_id=dst_account_id, tgw_account_id=tgw_account_id)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 You're expert in AWS Networking, with in depth knowledge in AWS VPC, Cloud WAN, Transit Gateway,
 Direct Connect, VPN, Interconnect, SDWAN,
@@ -221,6 +284,14 @@ documentation to understand architectures and use AWS best practices guides to g
 should be improved or built. You also have in depth knowledge in BGP, MPLS, TCP/IP, HTTP and DNS
 
 When the user asks whether resources can connect:
+First decide which account each end is in. If BOTH ends are in the same account,
+use check_reachability (EC2 Reachability Analyzer). If the ends are in DIFFERENT
+accounts (for example "can prod-instance in SpokeDev1 reach shared-services in the
+networking account"), Reachability Analyzer cannot see the other account's route
+tables, so use the cross-account flow below instead. If you are unsure which
+applies, ask whether the two resources are in the same account.
+
+Same account:
 1. If they named an instance by a friendly name (not an i-xxxx id), call
    resolve_instance to get its id, for both source and destination.
    If there are multiple matches, ask the user which one. If none, say so.
@@ -231,6 +302,27 @@ When the user asks whether resources can connect:
    ENI_SG_RULES_MISMATCH means a security group does not allow that port).
    When a security group is the likely cause, call check_security_group on the
    destination to find the exact rule, then suggest the specific fix.
+
+Cross-account (source and destination in different accounts):
+1. Resolve each end with resolve_endpoint, passing whatever the user gave you (a
+   name, instance id, private IP, or ARN), the account it is in, and the region.
+   If there are several matches, show them and ask the user to confirm the right
+   instance by name or id before going on. Do this for the source and the
+   destination.
+2. Ask for the protocol and port if the user did not give them (infer common
+   ports from service names when it is obvious: HTTPS=443, MySQL=3306, SSH=22).
+3. Call trace_cross_account with the confirmed source and destination instance
+   ids, their accounts, the region, and the port and protocol. The Transit
+   Gateway owner (hub) account defaults to the destination account; pass
+   tgw_account_id if the hub is a different account.
+4. Read the findings in order and explain them plainly. Name the first step with
+   result "fail" as the blocker and give the specific fix (for example "add an
+   inbound rule on the destination security group allowing tcp/443 from the
+   source's IP or CIDR"). Report "unknown" steps as coverage gaps, not failures
+   (often a missing or mismatched TRACERAI_EXTERNAL_ID). If there is an
+   "inspection / firewall" info finding, tell the user everything around the
+   firewall checks out and they should verify the firewall policy allows the
+   flow; do not claim the firewall is the problem, only that it was not inspected.
 
 You can also answer direct security group questions (for example "is sg-123
 allowing port 1010?") by calling check_security_group with a port.
@@ -388,7 +480,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )

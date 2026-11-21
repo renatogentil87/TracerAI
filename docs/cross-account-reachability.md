@@ -87,5 +87,11 @@ call the path healthy.
 
 ## Status
 
-Planned. The single-account tools (route table, TGW routes, Cloud WAN routes, firewall
-policy readers) are the per-layer pieces this walk needs, so building those comes first.
+Implemented for the same-region case in `tracerai/tools/reachability_trace.py`
+(`resolve_endpoint` and `trace_cross_account`). The forward and return walk reads
+security groups, NACLs, VPC route tables and the Transit Gateway route table in
+the hub account, and reports the first blocking layer. An inspection VPC on the
+path is detected and flagged for manual firewall review.
+
+Not yet implemented: cross-region paths (TGW peering between regions), reading
+firewall policy to verify the inspection step, and expanding prefix lists.
