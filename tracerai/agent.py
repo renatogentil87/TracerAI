@@ -14,6 +14,8 @@ from tracerai.tools.instances import list_instances as _list_instances
 from tracerai.tools.security_groups import describe_security_group as _describe_security_group
 from tracerai.tools.security_groups import scan_port as _scan_port
 from tracerai.tools.discovery import discover_network as _discover_network
+from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
+from tracerai.tools.cross_account import discover_via_attachments as _discover_via_attachments
 from tracerai.banner import print_banner
 
 
@@ -133,6 +135,44 @@ def discover_network(region: str = None) -> dict:
     return _discover_network(region)
 
 
+@tool
+def get_vpc_route_tables(vpc_id: str, account_id: str = None, region: str = None) -> dict:
+    """Read the route tables for a VPC, in this or another account.
+
+    Use this to answer questions like "what route table is in vpc-abc in account
+    123456789012?". When account_id is given, TracerAI assumes a read-only role
+    in that account to read it; when omitted, it uses the current account. Ask
+    for the region if the user did not give one.
+
+    Args:
+        vpc_id: the VPC id, e.g. "vpc-0abc...".
+        account_id: the 12-digit account that owns the VPC (optional).
+        region: the region the VPC is in.
+
+    Returns the VPC's route tables with their routes, or a note if the account's
+    role could not be assumed.
+    """
+    return _get_vpc_route_tables(vpc_id, account_id=account_id, region=region)
+
+
+@tool
+def discover_network_cross_account(region: str = None) -> dict:
+    """Map the network across accounts using Transit Gateway attachments.
+
+    Run from the Transit Gateway owner account. Lists the VPC attachments to find
+    every connected VPC and its owner account, then reads each VPC's route tables
+    (assuming the read-only role for VPCs in other accounts). If the user did not
+    give a region, ask first.
+
+    Args:
+        region: the region to map, e.g. "eu-west-1".
+
+    Returns a per-attachment list with each VPC's route tables; accounts without
+    the read-only role are listed with a note rather than failing the whole map.
+    """
+    return _discover_via_attachments(region)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 
 When the user asks whether resources can connect:
@@ -188,6 +228,18 @@ Network discovery:
   with their CIDRs, then the Transit Gateway attachments and route tables, then
   point to security groups and NACLs. Do not dump the raw JSON.
 
+Cross-account discovery:
+- When the user asks about a VPC's route tables and names an account (for example
+  "what route table is in vpc-abc in account 123456789012"), call
+  get_vpc_route_tables with that vpc_id and account_id. Ask for the region if not
+  given.
+- When the user asks to map the network across accounts, call
+  discover_network_cross_account. It uses the Transit Gateway attachments to find
+  every connected VPC and its owner account, then reads each VPC's route tables.
+- If a result has a note that the role could not be assumed in an account, tell
+  the user that account needs the TracerAI-ReadOnly role deployed (see the deploy
+  folder); do not treat it as a routing problem.
+
 Only answer from tool results. If you are missing a name or port, ask.
 
 Style:
@@ -210,7 +262,7 @@ def build_agent() -> Agent:
     )
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, discover_network_cross_account],
         system_prompt=SYSTEM_PROMPT,
     )
 
