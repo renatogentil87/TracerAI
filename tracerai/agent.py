@@ -388,7 +388,7 @@ if __name__ == "__main__":
     print_context()
     while True:
         try:
-            question = input("\nAsk TracerAI: ").strip()
+            question = input("\nTracerAI:\n").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not question or question.lower() in ("quit", "exit"):

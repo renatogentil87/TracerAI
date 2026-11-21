@@ -23,8 +23,10 @@ BANNER = r"""
 
 WELCOME = (
     "{b}Welcome to TracerAI.{r}\n"
-    "Tell me how you'd like to troubleshoot your network and I'll review it for you.\n"
-    "{d}e.g. \"can the web server reach the database on 3306?\"   (type 'quit' to exit){r}"
+    "I'm your AWS Networking Agent.\n"
+    "{d}e.g. \"can the web server reach the database on 3306?\"\n"
+    "e.g. \"can you discover my network in ca-central-1?\"\n"
+    "(type 'quit' to exit){r}"
 )
 
 
