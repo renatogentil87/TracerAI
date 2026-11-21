@@ -106,6 +106,25 @@ So TracerAI should not flatly call this a missing route. Planned improvements:
 - When inspection is in play, describe the expected flow (source to Transit Gateway to
   inspection firewall to destination and back) rather than treating it as broken.
 
+## Cross-account discovery (shipped, with follow-ups)
+
+Discovery is now cross-account. From the Transit Gateway owner account it maps the TGW
+attachments, then reads each connected VPC's CIDRs, subnets, route tables, security
+groups and NACLs in the VPC's owner account, assuming a read-only role (deploy/) for
+other accounts. Targeted lookups exist too: a VPC's route tables, and an instance's
+security groups, by account.
+
+Follow-ups:
+
+- The TracerAI-ReadOnly role has to be deployed into each account (CloudFormation
+  StackSet, from the management or a delegated-admin account) before cross-account reads
+  work. Until then those accounts come back with a "needs role" note.
+- Cloud WAN is still a placeholder in the discovery result (cloud_wan is empty). Fill it
+  in with the networkmanager client (global, us-east-1): core network, segments, segment
+  route tables / RIB, attachments.
+- Discovery makes many assume-role and describe calls on a large estate. Add concurrency
+  if it gets slow.
+
 ## Full path review for a TGW, Cloud WAN, and firewall network
 
 The north star. For a network like mine (Transit Gateway peered with Cloud WAN, with a

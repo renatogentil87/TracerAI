@@ -158,6 +158,10 @@ def discover_network(region: str = None) -> dict:
         "vpc_count": len(vpc_attachments),
         "vpc_attachments": vpc_attachments,
         "other_attachments": other,
+        # TODO: add Cloud WAN discovery here (core network, segments, segment
+        # route tables / RIB, attachments). Cloud WAN uses the networkmanager
+        # client, not ec2, and its APIs are global (us-east-1). Fill this in.
+        "cloud_wan": {},
     }
 
 
