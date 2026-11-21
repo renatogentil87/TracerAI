@@ -10,6 +10,9 @@ import boto3
 from strands import Agent, tool
 from strands.models import BedrockModel
 
+from rich.console import Console
+from rich.markdown import Markdown
+
 from tracerai.tools.reachability import reachability
 from tracerai.tools.instances import resolve_instance as _resolve_instance
 from tracerai.tools.instances import list_instances as _list_instances
@@ -19,6 +22,8 @@ from tracerai.tools.cross_account import discover_network as _discover_network
 from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
 from tracerai.tools.cross_account import get_instance_security_groups as _get_instance_security_groups
 from tracerai.banner import print_banner
+
+console = Console()
 
 
 @tool
@@ -364,6 +369,7 @@ def build_agent() -> Agent:
         model=model,
         tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups],
         system_prompt=system_prompt,
+        callback_handler=None,
     )
 
 
@@ -394,7 +400,11 @@ if __name__ == "__main__":
         if not question or question.lower() in ("quit", "exit"):
             break
         try:
-            agent(question)
+            with console.status("[dim]working...[/dim]", spinner="dots"):
+                result = agent(question)
+            answer = str(result).strip()
+            if answer:
+                console.print(Markdown(answer))
             print()
         except Exception as e:
             message = str(e)
