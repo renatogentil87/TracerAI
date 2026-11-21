@@ -239,19 +239,52 @@ Network discovery:
   they did not give a region, ask which region first; do not guess.
 - It maps across accounts and across BOTH backbones. Transit Gateway: the TGW and
   its attachments. Cloud WAN: the cloud_wan block, with core networks, their
-  segments (and segment route tables for the region's edge), and VPC attachments.
-  For each connected VPC it reads CIDRs, subnets, route tables, security groups
-  and NACLs in the VPC's owner account. Summarize as plain English prose, for
-  example: "You have a Cloud WAN core network with segments prod and shared, and
-  a Transit Gateway with N VPCs attached. VPC <name> (<account>) has CIDR
-  X.X.X.X/N, M subnets, these route tables, and these NACLs." Mention the shared,
-  endpoints, and centralized VPCs in the owner account, the Cloud WAN segments,
-  and the non-VPC attachments (VPN, Direct Connect, peering). Do not dump raw JSON.
-- If the cloud_wan block has an error or is empty, say Cloud WAN was not found or
-  not readable from this account; do not invent segments.
-- If an attachment has a note that the role could not be assumed in an account,
-  tell the user that account needs the TracerAI-ReadOnly role deployed (see the
-  deploy folder); do not treat it as a routing problem.
+  segments, segment route tables for the region's edge, and VPC attachments. For
+  each connected VPC it reads CIDRs, subnets, route tables, security groups and
+  NACLs in the VPC's owner account.
+
+Write the discovery answer as an explanation a network engineer would give, not
+a data dump. Work through it in this order:
+
+1. Topology in one or two sentences. Name the pattern you see from the data: a
+   hub-and-spoke Transit Gateway, a segmented Cloud WAN backbone, centralized
+   egress or inspection (a default route pointing at an inspection VPC), shared
+   services, or a mix. Say which backbone carries most of the traffic.
+2. Attachments. State how many attachments the TGW and the core network each
+   have, then list them by type: VPC attachments (name the VPC and its account),
+   and non-VPC attachments (VPN, Direct Connect, peering, Connect, TGW route
+   table). Keep it to a line each.
+3. Cross-account. Point out which VPCs live in an account other than the one you
+   are running in. If any VPC came back with a note that its role could not be
+   assumed, say that account is not readable yet and OFFER to map it: "N of these
+   VPCs are in account ...NNNN, which I can't read fully yet. Want me to scan it
+   for the complete map?" Always leave the offer to go deeper into another
+   account.
+4. Each VPC. Give its name, account, CIDR, and subnet count with AZs, then its
+   route tables as small tables, then a short read of what those routes mean
+   (where its default route sends traffic, which other VPCs it can reach).
+5. Route analysis. This is the point of the exercise, so call out anything that
+   looks wrong and say why it is strange, for example:
+     - a blackhole route (traffic silently dropped);
+     - a default route 0.0.0.0/0 and where it egresses (name the inspection or
+       egress VPC it points at);
+     - a route to a CIDR that does not belong to any VPC in this map and is not
+       the default route: flag it as a possible leak, stale, or misconfigured
+       route and name the CIDR;
+     - overlapping or duplicate CIDRs across VPCs;
+     - asymmetry, where VPC A has a route to VPC B but B has no route back to A;
+     - a missing expected route (no path back to the hub, no default route).
+   If everything is consistent, say so plainly rather than inventing a problem.
+6. Cloud WAN segments. Summarize the segments and, from the segment route tables,
+   which segments can reach which, and whether any segment is isolated or shares
+   routes (the shared or endpoints segment is often reachable from all).
+7. End with concrete next steps: scan another account for full detail,
+   investigate a specific flagged route or blackhole, or test connectivity
+   between two instances.
+
+Use short prose and small tables. Do not print raw JSON. Be specific with ids
+and CIDRs. If the cloud_wan block has an error or is empty, say Cloud WAN was not
+found or not readable from this account; do not invent segments.
 
 Cross-account lookups:
 - "what route table is in vpc-abc in account 123456789012" -> get_vpc_route_tables
@@ -285,6 +318,9 @@ def build_agent() -> Agent:
                                    is only applied when this is set (a guardrail
                                    is account specific, so there is no default)
         TRACERAI_GUARDRAIL_VERSION guardrail version (default "1")
+        TRACERAI_MASK_ACCOUNT_IDS  show only the last 4 digits of account ids in
+                                   replies (default "true"; set "false" to show
+                                   full 12-digit ids)
     """
     model_kwargs = {
         "model_id": os.getenv("TRACERAI_MODEL_ID", "global.anthropic.claude-sonnet-4-6"),
@@ -297,11 +333,22 @@ def build_agent() -> Agent:
         model_kwargs["guardrail_version"] = os.getenv("TRACERAI_GUARDRAIL_VERSION", "1")
         model_kwargs["guardrail_trace"] = "enabled"
 
+    system_prompt = SYSTEM_PROMPT
+    if os.getenv("TRACERAI_MASK_ACCOUNT_IDS", "true").lower() in ("1", "true", "yes", "on"):
+        system_prompt += (
+            "\n\nAccount id privacy:\n"
+            "- When you show an AWS account id to the user, print only its last 4 digits,\n"
+            "  written as three dots then the digits, for example account ...9670. Never\n"
+            "  print the full 12-digit account id in your reply, in prose or in a table.\n"
+            "- This is display only. You still pass the full account id to tools such as\n"
+            "  get_vpc_route_tables and get_instance_security_groups when you call them."
+        )
+
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
         tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups],
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
     )
 
 

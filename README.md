@@ -67,9 +67,15 @@ not edit code to point at your account:
 | `TRACERAI_BEDROCK_REGION` | `AWS_REGION`, else `ca-central-1` | region the model is called in |
 | `TRACERAI_GUARDRAIL_ID` | _unset_ | optional Bedrock guardrail; applied only when set (guardrails are account-specific, so there is no default) |
 | `TRACERAI_GUARDRAIL_VERSION` | `1` | guardrail version, used only with the id |
+| `TRACERAI_MASK_ACCOUNT_IDS` | `true` | show only the last 4 digits of account ids in replies (set `false` to show full ids) |
 
 A fresh clone runs with no guardrail. Set `TRACERAI_GUARDRAIL_ID` only if you
 have a guardrail in your own account.
+
+By default TracerAI prints account ids as their last 4 digits only (for example
+`account ...9670`) so the output is safe to paste into tickets or share. Set
+`TRACERAI_MASK_ACCOUNT_IDS=false` if you want full 12-digit account ids. Either
+way, full ids are always used internally for cross-account calls.
 
 ## Cross-account discovery (prerequisites)
 

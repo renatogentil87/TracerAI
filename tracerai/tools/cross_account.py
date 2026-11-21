@@ -244,12 +244,14 @@ def discover_cloud_wan(region: str = None) -> dict:
             entry["segments_note"] = f"could not read core network detail: {e}"
 
         # Segment route tables (RIB) for the requested region's edge.
-        if region:
+        global_network_id = cn.get("GlobalNetworkId")
+        if region and global_network_id:
             for seg in entry["segments"]:
                 if region not in (seg.get("edge_locations") or []):
                     continue
                 try:
                     routes = nm.get_network_routes(
+                        GlobalNetworkId=global_network_id,
                         RouteTableIdentifier={
                             "CoreNetworkSegmentEdge": {
                                 "CoreNetworkId": core_network_id,
