@@ -7,9 +7,39 @@ target account and trust the account TracerAI runs in.
     python tracerai/tools/cross_account.py
 """
 
+import os
+
 import boto3
 
 from tracerai.aws_session import get_session
+
+
+def _assume_failure_note(account_id: str, exc: Exception) -> str:
+    """Turn an assume-role/read failure into an accurate diagnosis.
+
+    The old message always blamed a missing role, which is wrong when the real
+    cause is a missing or mismatched external id or a caller without
+    sts:AssumeRole. STS deliberately returns the same AccessDenied for all of
+    those, so this reports the real error and lists the likely causes in order
+    rather than asserting one.
+    """
+    msg = str(exc)
+    has_external_id = bool(os.getenv("TRACERAI_EXTERNAL_ID"))
+    base = f"could not assume TracerAI-ReadOnly in account {account_id}"
+    if "AccessDenied" in msg and "AssumeRole" in msg:
+        if not has_external_id:
+            cause = ("TRACERAI_EXTERNAL_ID is not set, but the role's trust policy "
+                     "requires an external id. Set TRACERAI_EXTERNAL_ID to the value "
+                     "used when the role was deployed and retry. Do not recreate the "
+                     "role; this is almost certainly the cause.")
+        else:
+            cause = ("AssumeRole was denied. Likely causes, most common first: "
+                     "(1) TRACERAI_EXTERNAL_ID does not match the role's trust policy; "
+                     "(2) the identity running TracerAI is not granted sts:AssumeRole "
+                     "on this role; (3) the TracerAI-ReadOnly role is not deployed in "
+                     "this account. Verify 1 and 2 before recreating the role.")
+        return f"{base}: {cause} [{msg}]"
+    return f"{base}: {msg}"
 
 
 def _flatten_sg_rule(rule):
@@ -199,7 +229,7 @@ def discover_network(region: str = None) -> dict:
             entry["vpc"] = _vpc_detail(session, vpc_id, region)
         except Exception as e:
             entry["vpc"] = None
-            entry["note"] = f"could not read account {account_id} (needs TracerAI-ReadOnly role): {e}"
+            entry["note"] = _assume_failure_note(account_id, e)
         vpc_attachments.append(entry)
 
     return {
@@ -337,8 +367,7 @@ def discover_cloud_wan(region: str = None, account_names: dict = None) -> dict:
                     vatt["vpc"] = _vpc_detail(session, vpc_id, vregion)
                 except Exception as e:
                     vatt["vpc"] = None
-                    vatt["note"] = (f"could not read account {account_id} "
-                                    f"(needs TracerAI-ReadOnly role): {e}")
+                    vatt["note"] = _assume_failure_note(account_id, e)
                 entry["vpc_attachments"].append(vatt)
             else:
                 if region and edge and edge != region:
@@ -369,7 +398,7 @@ def get_vpc_route_tables(vpc_id: str, account_id: str = None, region: str = None
         session = get_session(account_id=account_id, region=region)
     except Exception as e:
         return {"account_id": account_id, "vpc_id": vpc_id,
-                "error": f"could not assume role in account {account_id}: {e}"}
+                "error": _assume_failure_note(account_id, e)}
     detail = _vpc_detail(session, vpc_id, region)
     return {"account_id": account_id, "vpc_id": vpc_id, "region": region,
             "route_tables": detail["route_tables"]}
@@ -387,7 +416,7 @@ def get_instance_security_groups(instance_id: str, account_id: str = None, regio
         session = get_session(account_id=account_id, region=region)
     except Exception as e:
         return {"account_id": account_id, "instance_id": instance_id,
-                "error": f"could not assume role in account {account_id}: {e}"}
+                "error": _assume_failure_note(account_id, e)}
 
     ec2 = session.client("ec2", region_name=region)
     resp = ec2.describe_instances(InstanceIds=[instance_id])

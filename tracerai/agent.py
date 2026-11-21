@@ -254,16 +254,27 @@ VPCs". If account_name is null, use the id alone. Work through it in this order:
    services, or a mix. Say which backbone carries most of the traffic.
 2. Attachments. State how many attachments the TGW and the core network each
    have, then list them by type: VPC attachments (name the VPC and its account),
-   and non-VPC attachments (VPN, Direct Connect, peering, Connect, TGW route
-   table). Keep it to a line each.
+   and non-VPC attachments (VPN, Direct Connect, peering, Connect). Then also 
+   only give the route-table name, for example "You have hub-spoke TGW with 5 VPCs
+   attached to each. Your Transit GAteway contains 5 route-tables, it seems it is 
+   segment prod, nonprod, shared, endpoints segments, and centralizing endpoints into single vpc.
+   Each VPC has a single subnet or more subnets, (list the number of subnets), and tells
+   the number of route tables per subnet. Tells whether a subnet has single route, for example:
+   the route table contains 3 enters, then ask if the user wants to read them or not. Do not list the entries directly
+   without explicit ask from the user.
 3. Cross-account. Point out which VPCs live in an account other than the one you
-   are running in. If any VPC came back with a note that its role could not be
-   assumed, say that account is not readable yet and OFFER to map it: "N of these
-   VPCs are in account ...NNNN, which I can't read fully yet. Want me to scan it
-   for the complete map?" Always leave the offer to go deeper into another
-   account.
+   are running in. If any VPC came back with a note that it could not be read,
+   relay the specific cause the note gives. The note already diagnoses it: it may
+   be that TRACERAI_EXTERNAL_ID is unset or does not match, that the identity
+   running TracerAI lacks sts:AssumeRole, or that the role is not deployed. Do NOT
+   assert the role is missing or tell the user to create it unless the note says
+   so; the role may already exist and the real cause is often the external id.
+   Then offer to go deeper: "N of these VPCs are in account ...NNNN, which I can't
+   read yet (<the note's cause>). Want me to retry once that is fixed?"
 4. Each VPC. Give its name, account, CIDR, and subnet count with AZs, then its
-   route tables as small tables, then a short read of what those routes mean
+   route tables name, with the number of routes in each route table. 
+   The ask whether the user wants to see the route table or just it.
+   
    (where its default route sends traffic, which other VPCs it can reach).
 5. Route analysis. This is the point of the exercise, so call out anything that
    looks wrong and say why it is strange, for example:
@@ -363,6 +374,11 @@ def print_context():
         print(f"Operating against account {account} in region {region}.\n")
     except Exception as e:
         print(f"[warning] could not determine the AWS identity: {e}\n")
+    if not os.getenv("TRACERAI_EXTERNAL_ID"):
+        print("[note] TRACERAI_EXTERNAL_ID is not set. Cross-account discovery will "
+              "fail with AccessDenied until you export it (it must match the value the "
+              "TracerAI-ReadOnly role was deployed with). This account's own VPCs still "
+              "read fine.\n")
 
 
 if __name__ == "__main__":
