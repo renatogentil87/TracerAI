@@ -21,6 +21,7 @@ from tracerai.tools.security_groups import scan_port as _scan_port
 from tracerai.tools.cross_account import discover_network as _discover_network
 from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
 from tracerai.tools.cross_account import get_instance_security_groups as _get_instance_security_groups
+from tracerai.tools.cross_account import _account_names
 from tracerai.banner import print_banner
 
 console = Console()
@@ -374,11 +375,13 @@ def build_agent() -> Agent:
 
 
 def print_context():
-    """Show which AWS account and region the tools will operate against."""
+    """Show which AWS account (by name, else last 4 digits) and region the tools use."""
     try:
         account = boto3.client("sts").get_caller_identity()["Account"]
         region = boto3.session.Session().region_name or "unset"
-        print(f"Operating against account {account} in region {region}.\n")
+        name = _account_names().get(account)
+        where = f"your {name}" if name else f"account ...{account[-4:]}"
+        print(f"Operating in {where} in region {region}.\n")
     except Exception as e:
         print(f"[warning] could not determine the AWS identity: {e}\n")
     if not os.getenv("TRACERAI_EXTERNAL_ID"):
