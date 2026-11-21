@@ -162,6 +162,10 @@ For **cross-account discovery**, two more things apply:
 - **In the trusted account** (where TracerAI runs): the identity needs
   `sts:AssumeRole` on `arn:aws:iam::*:role/TracerAI-ReadOnly`, plus
   `networkmanager:List*/Get*/Describe*` if you own a Cloud WAN core network.
+  To label accounts with their names (for example "SpokeDev1 (...9670)") the
+  identity also needs `organizations:ListAccounts`, which works from the
+  management account or a delegated administrator. Without it, discovery still
+  works and just shows the account id.
 - **In each target account**: the `TracerAI-ReadOnly` role from
   [`deploy/cross-account-role.yaml`](deploy/cross-account-role.yaml) grants only
   read-only EC2 describe and networkmanager read actions. Deploying the role

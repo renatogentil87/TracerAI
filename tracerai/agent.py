@@ -244,7 +244,9 @@ Network discovery:
   NACLs in the VPC's owner account.
 
 Write the discovery answer as an explanation a network engineer would give, not
-a data dump. Work through it in this order:
+a data dump. Refer to each account by its name and id together, taking the name
+from the account_name field, for example "your SpokeDev1 account (...9670) has 5
+VPCs". If account_name is null, use the id alone. Work through it in this order:
 
 1. Topology in one or two sentences. Name the pattern you see from the data: a
    hub-and-spoke Transit Gateway, a segmented Cloud WAN backbone, centralized
@@ -338,8 +340,9 @@ def build_agent() -> Agent:
         system_prompt += (
             "\n\nAccount id privacy:\n"
             "- When you show an AWS account id to the user, print only its last 4 digits,\n"
-            "  written as three dots then the digits, for example account ...9670. Never\n"
-            "  print the full 12-digit account id in your reply, in prose or in a table.\n"
+            "  written as three dots then the digits, for example the SpokeDev1 account\n"
+            "  (...9670). Never print the full 12-digit account id in your reply, in prose\n"
+            "  or in a table. Account names (account_name) may be shown in full.\n"
             "- This is display only. You still pass the full account id to tools such as\n"
             "  get_vpc_route_tables and get_instance_security_groups when you call them."
         )

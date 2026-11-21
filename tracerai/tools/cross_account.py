@@ -68,6 +68,24 @@ def _nm_paginate(func, key: str, **kwargs):
     return items
 
 
+def _account_names():
+    """Map account id -> account name via AWS Organizations.
+
+    Works when the caller can read Organizations (the management account or a
+    delegated administrator). Returns an empty dict if that call is not allowed,
+    so discovery still works, just without friendly names.
+    """
+    names = {}
+    try:
+        org = boto3.client("organizations", region_name="us-east-1")
+        for page in org.get_paginator("list_accounts").paginate():
+            for a in page.get("Accounts", []):
+                names[a["Id"]] = a.get("Name")
+    except Exception:
+        pass
+    return names
+
+
 def _vpc_detail(session, vpc_id: str, region: str) -> dict:
     """Read one VPC's CIDRs, subnets, route tables, security groups and NACLs."""
     ec2 = session.client("ec2", region_name=region)
@@ -146,6 +164,7 @@ def discover_network(region: str = None) -> dict:
 
     ec2 = boto3.client("ec2", region_name=region)
     me = boto3.client("sts").get_caller_identity()["Account"]
+    acct_names = _account_names()
 
     attachments = []
     for page in ec2.get_paginator("describe_transit_gateway_attachments").paginate():
@@ -163,6 +182,7 @@ def discover_network(region: str = None) -> dict:
                 "type": a.get("ResourceType"),
                 "resource_id": a.get("ResourceId"),
                 "account_id": a.get("ResourceOwnerId"),
+                "account_name": acct_names.get(a.get("ResourceOwnerId")),
             })
             continue
         account_id = a.get("ResourceOwnerId")
@@ -171,6 +191,7 @@ def discover_network(region: str = None) -> dict:
             "attachment_id": a["TransitGatewayAttachmentId"],
             "transit_gateway_id": tgw,
             "account_id": account_id,
+            "account_name": acct_names.get(account_id),
             "vpc_id": vpc_id,
         }
         try:
@@ -187,11 +208,11 @@ def discover_network(region: str = None) -> dict:
         "vpc_count": len(vpc_attachments),
         "vpc_attachments": vpc_attachments,
         "other_attachments": other,
-        "cloud_wan": discover_cloud_wan(region),
+        "cloud_wan": discover_cloud_wan(region, account_names=acct_names),
     }
 
 
-def discover_cloud_wan(region: str = None) -> dict:
+def discover_cloud_wan(region: str = None, account_names: dict = None) -> dict:
     """Discover AWS Cloud WAN in a region, across accounts.
 
     Cloud WAN's control plane (networkmanager) is global, so the client is
@@ -212,6 +233,8 @@ def discover_cloud_wan(region: str = None) -> dict:
     """
     nm = boto3.client("networkmanager", region_name="us-east-1")
     me = boto3.client("sts").get_caller_identity()["Account"]
+    if account_names is None:
+        account_names = _account_names()
 
     try:
         core_networks = _nm_paginate(nm.list_core_networks, "CoreNetworks")
@@ -303,6 +326,7 @@ def discover_cloud_wan(region: str = None) -> dict:
                     "segment": a.get("SegmentName"),
                     "edge_location": edge,
                     "account_id": account_id,
+                    "account_name": account_names.get(account_id),
                     "vpc_id": vpc_id,
                     "state": a.get("State"),
                 }
@@ -326,6 +350,7 @@ def discover_cloud_wan(region: str = None) -> dict:
                     "edge_location": edge,
                     "resource_arn": a.get("ResourceArn"),
                     "account_id": a.get("OwnerAccountId"),
+                    "account_name": account_names.get(a.get("OwnerAccountId")),
                 })
         result.append(entry)
 
