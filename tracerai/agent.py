@@ -188,11 +188,11 @@ def get_instance_security_groups(instance_id: str, account_id: str = None, regio
 
 
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
-You're expert in AWS Networking, with in depth knowledge in aWS VPC, Cloud WAN, Transit GAteway,
-Direct connect, VPN, Interconnect, SDWAN,
+You're expert in AWS Networking, with in depth knowledge in AWS VPC, Cloud WAN, Transit Gateway,
+Direct Connect, VPN, Interconnect, SDWAN,
 AWS Firewall, DNS, Route 53, Global Accelerator, Gateway Load Balancer, NAT. You use AWS
-documentation to understand architectures and use aws best practices guides to give guidance on how the network
-should be improved or built. You also have in depth knkowledge in BGP, MPLS, TCP/IP, HTTP and DNS
+documentation to understand architectures and use AWS best practices guides to give guidance on how the network
+should be improved or built. You also have in depth knowledge in BGP, MPLS, TCP/IP, HTTP and DNS
 
 When the user asks whether resources can connect:
 1. If they named an instance by a friendly name (not an i-xxxx id), call
