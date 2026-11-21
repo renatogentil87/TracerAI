@@ -258,6 +258,16 @@ def _tgw_assoc_and_lookup(tgw_session, region, vpc_id, dst_ip):
     return {"attachment_id": att["TransitGatewayAttachmentId"], "route_table_id": rt_id, "match": match}
 
 
+def _tgw_owner(session, region, tgw_id):
+    """The account that owns a Transit Gateway (visible even when it is shared)."""
+    try:
+        tgws = session.client("ec2", region_name=region).describe_transit_gateways(
+            TransitGatewayIds=[tgw_id]).get("TransitGateways", [])
+        return tgws[0].get("OwnerId") if tgws else None
+    except Exception:
+        return None
+
+
 def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str = "tcp",
                         region: str = None, src_account_id: str = None,
                         dst_account_id: str = None, tgw_account_id: str = None) -> dict:
@@ -265,8 +275,9 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
 
     dst may be a destination instance id (preferred, so the destination side can
     be checked) or a private IP (routing is still checked). tgw_account_id is the
-    account that owns the Transit Gateway (defaults to the destination account,
-    then the source account).
+    account that owns the Transit Gateway; when omitted it is resolved from the
+    TGW's own OwnerId, so it works whether the hub is the source, the
+    destination, or a separate networking account.
     """
     findings = []
 
@@ -324,7 +335,7 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
     # 3. Source VPC route table.
     routes = _vpc_routes(src.get("route_table"))
     match = _match_route(routes, dst_ip)
-    via_tgw = False
+    via_tgw, tgw_id = False, None
     if not match:
         add("source route table", "fail",
             f"no route to {dst_ip} in {src.get('route_table', {}).get('RouteTableId')}")
@@ -333,11 +344,18 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         add("source route table", "pass",
             f"{dst_ip} routes via {kind} {tid} (match {match['cidr']})")
         via_tgw = kind == "tgw"
+        if via_tgw:
+            tgw_id = tid
+
+    # Resolve the TGW owner (hub) account from the TGW id, not the destination.
+    tgw_acct = None
+    if via_tgw:
+        tgw_acct = tgw_account_id or _tgw_owner(src_session, region, tgw_id) \
+            or dst_account_id or src_account_id
 
     # 4 + 5. Transit Gateway route table and inspection detection.
     inspection = None
     if via_tgw:
-        tgw_acct = tgw_account_id or dst_account_id or src_account_id
         try:
             tgw_session = get_session(account_id=_norm(tgw_acct, me), region=region)
             tgw = _tgw_assoc_and_lookup(tgw_session, region, src["vpc_id"], dst_ip)
@@ -382,7 +400,6 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
 
     # 7. Return path: TGW route back, and stateless NACL ephemeral return.
     if dst_ctx and via_tgw:
-        tgw_acct = tgw_account_id or dst_account_id or src_account_id
         try:
             tgw_session = get_session(account_id=_norm(tgw_acct, me), region=region)
             back = _tgw_assoc_and_lookup(tgw_session, region, dst_ctx["vpc_id"], src_ip)

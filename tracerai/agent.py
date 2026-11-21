@@ -266,7 +266,7 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         region: the region both ends are in.
         src_account_id: the account that owns the source.
         dst_account_id: the account that owns the destination.
-        tgw_account_id: the Transit Gateway owner (hub) account; defaults to the destination account.
+        tgw_account_id: the Transit Gateway owner (hub) account; when omitted it is resolved from the TGW's OwnerId.
 
     Returns findings (each step with pass/fail/unknown/info and detail) and a verdict naming the
     blocker, or saying the path looks open. Layers it cannot read are reported as unknown, not failed.
