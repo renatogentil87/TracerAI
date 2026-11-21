@@ -6,6 +6,13 @@ TracerAI is a networking troubleshooting agent for AWS. It is built with the Str
 
 Ask a question like "Can the web server reach the database on 3306?" The agent resolves instance names to ids, runs Reachability Analyzer, inspects the security group when something is blocked, and returns a diagnosis with the likely fix. It can also list instances in a region.
 
+It also does **cross-account network discovery**. Ask "discover my network in
+eu-west-1" and it maps both backbones — **Transit Gateway** and **AWS Cloud WAN**
+— and, for every attached VPC, reads the CIDRs, subnets, route tables, security
+groups and NACLs in that VPC's owner account. It reads other accounts by assuming
+a read-only role there (see [`deploy/`](deploy/README.md)); accounts without the
+role are reported with a note instead of failing.
+
 ## How it works
 
 The agent loop runs in your Python process.
@@ -51,6 +58,37 @@ confirm you are pointed at the right place.
 The Bedrock model id and its region are set in `tracerai/agent.py` (`build_agent`).
 Change them there if you use a different model or region.
 
+## Cross-account discovery (prerequisites)
+
+Single-account use needs nothing beyond the prerequisites above. To discover
+VPCs that live in **other** accounts, deploy a read-only role into each target
+account first. This is a one-time setup, done by an administrator.
+
+What has to be in place:
+
+1. **A `TracerAI-ReadOnly` role in each target account** that trusts the account
+   TracerAI runs in. Deploy it from [`deploy/`](deploy/README.md) — one account
+   with `aws cloudformation deploy`, or org-wide with a service-managed StackSet.
+   The management account is deployed directly (StackSets skip it).
+2. **`sts:AssumeRole` permission** for the identity TracerAI runs as, on
+   `arn:aws:iam::*:role/TracerAI-ReadOnly`.
+3. **A shared external id**, the same value in the role's trust policy and at run
+   time.
+
+Then run with the two cross-account environment variables set:
+
+```bash
+export AWS_PROFILE=<trusted-account-profile>
+export AWS_REGION=<region of your Bedrock model>
+export TRACERAI_ROLE_NAME=TracerAI-ReadOnly              # the role to assume
+export TRACERAI_EXTERNAL_ID=<the shared secret>          # matches the template
+python -m tracerai.agent
+# then: "discover my network in eu-west-1"
+```
+
+See [`deploy/README.md`](deploy/README.md) for the full runbook and the IAM
+template.
+
 ## Try a tool on its own
 
 Each tool runs standalone, which is the quickest way to test credentials and output:
@@ -66,10 +104,13 @@ python tracerai/tools/security_groups.py
 | Path | Purpose |
 |------|---------|
 | `tracerai/agent.py` | Strands agent, tool wiring, system prompt |
+| `tracerai/aws_session.py` | boto3 session helper; assumes the read-only role for cross-account reads |
 | `tracerai/tools/reachability.py` | EC2 Reachability Analyzer wrapper |
 | `tracerai/tools/instances.py` | Resolve a Name tag to an id, and list instances |
 | `tracerai/tools/security_groups.py` | Inspect security group rules |
+| `tracerai/tools/cross_account.py` | Cross-account network discovery (TGW + Cloud WAN, per-VPC detail) |
 | `tracerai/banner.py` | Startup banner |
+| `deploy/` | CloudFormation template + runbook for the cross-account read-only role |
 | `requirements.txt` | Dependencies |
 | `ROADMAP.md` | Planned features |
 
@@ -88,6 +129,17 @@ All tool calls are read-only or analysis only. The identity running TracerAI nee
 
 A broad policy like PowerUserAccess covers all of this. There are no mutating
 network permissions; TracerAI diagnoses, it does not change infrastructure.
+
+For **cross-account discovery**, two more things apply:
+
+- **In the trusted account** (where TracerAI runs): the identity needs
+  `sts:AssumeRole` on `arn:aws:iam::*:role/TracerAI-ReadOnly`, plus
+  `networkmanager:List*/Get*/Describe*` if you own a Cloud WAN core network.
+- **In each target account**: the `TracerAI-ReadOnly` role from
+  [`deploy/cross-account-role.yaml`](deploy/cross-account-role.yaml) grants only
+  read-only EC2 describe and networkmanager read actions. Deploying the role
+  needs IAM-write permission (PowerUserAccess is not enough), which is why the
+  org-wide rollout uses a StackSet from the management account.
 
 ## Troubleshooting
 

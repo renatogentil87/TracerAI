@@ -121,19 +121,25 @@ def discover_network(region: str = None) -> dict:
     """Map the whole network in a region, across accounts.
 
     Use this when the user asks to discover or map their network. Run from the
-    Transit Gateway owner account. It lists the TGW attachments, then for each
-    connected VPC reads that VPC's full detail (CIDRs, subnets, route tables,
-    security groups, NACLs) in its owner account, assuming the read-only role for
-    VPCs in other accounts and using local creds for this account's own VPCs
-    (shared, endpoints, centralized). Non-VPC attachments (VPN, peering, Direct
-    Connect) are listed separately. If the user did not give a region, ask first.
+    account that owns the Transit Gateway and/or Cloud WAN core network. It
+    covers BOTH backbones:
+      - Transit Gateway: lists the TGW attachments, then for each connected VPC
+        reads that VPC's full detail (CIDRs, subnets, route tables, security
+        groups, NACLs) in its owner account.
+      - Cloud WAN: lists core networks, their segments and (for this region's
+        edge) the segment route tables, then reads each attached VPC's full
+        detail in its owner account.
+    It assumes the read-only role for VPCs in other accounts and uses local
+    creds for this account's own VPCs (shared, endpoints, centralized). Non-VPC
+    attachments (VPN, peering, Direct Connect, TGW-to-Cloud-WAN) are listed
+    separately. If the user did not give a region, ask first.
 
     Args:
         region: the AWS region to map, e.g. "eu-west-1".
 
-    Returns transit_gateways, vpc_attachments (each with its account and full VPC
-    detail), and other_attachments. An account missing the read-only role is
-    listed with a note, not failed.
+    Returns transit_gateways, vpc_attachments, other_attachments, and cloud_wan
+    (core_networks with segments and vpc_attachments). An account missing the
+    read-only role is listed with a note, not failed.
     """
     return _discover_network(region)
 
@@ -229,13 +235,18 @@ CIDR that would allow it.
 Network discovery:
 - When the user asks to discover or map their network, call discover_network. If
   they did not give a region, ask which region first; do not guess.
-- It maps across accounts: the TGW and its attachments, and for each connected
-  VPC its CIDRs, subnets, route tables, security groups and NACLs (in the VPC's
-  owner account). Summarize it as plain English prose, for example: "You have a
-  centralized Transit Gateway with N VPCs attached. VPC <name> (<account>) has
-  CIDR X.X.X.X/N, M subnets, these route tables, and these NACLs." Mention the
-  shared, endpoints, and centralized VPCs in the TGW owner account, and the
-  non-VPC attachments (VPN, Direct Connect, peering). Do not dump the raw JSON.
+- It maps across accounts and across BOTH backbones. Transit Gateway: the TGW and
+  its attachments. Cloud WAN: the cloud_wan block, with core networks, their
+  segments (and segment route tables for the region's edge), and VPC attachments.
+  For each connected VPC it reads CIDRs, subnets, route tables, security groups
+  and NACLs in the VPC's owner account. Summarize as plain English prose, for
+  example: "You have a Cloud WAN core network with segments prod and shared, and
+  a Transit Gateway with N VPCs attached. VPC <name> (<account>) has CIDR
+  X.X.X.X/N, M subnets, these route tables, and these NACLs." Mention the shared,
+  endpoints, and centralized VPCs in the owner account, the Cloud WAN segments,
+  and the non-VPC attachments (VPN, Direct Connect, peering). Do not dump raw JSON.
+- If the cloud_wan block has an error or is empty, say Cloud WAN was not found or
+  not readable from this account; do not invent segments.
 - If an attachment has a note that the role could not be assumed in an account,
   tell the user that account needs the TracerAI-ReadOnly role deployed (see the
   deploy folder); do not treat it as a routing problem.

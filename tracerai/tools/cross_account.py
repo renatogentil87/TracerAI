@@ -39,6 +39,35 @@ def _route(r):
     }
 
 
+def _parse_vpc_arn(arn: str):
+    """Pull region, account id and vpc id out of a VPC ARN.
+
+    arn:aws:ec2:<region>:<account>:vpc/<vpc-id>
+    """
+    try:
+        parts = arn.split(":")
+        region = parts[3]
+        account = parts[4]
+        vpc_id = parts[5].split("/")[-1]
+        return region, account, vpc_id
+    except Exception:
+        return None, None, None
+
+
+def _nm_paginate(func, key: str, **kwargs):
+    """Collect every page from a networkmanager list call (NextToken based)."""
+    items, token = [], None
+    while True:
+        if token:
+            kwargs["NextToken"] = token
+        resp = func(**kwargs)
+        items.extend(resp.get(key, []))
+        token = resp.get("NextToken")
+        if not token:
+            break
+    return items
+
+
 def _vpc_detail(session, vpc_id: str, region: str) -> dict:
     """Read one VPC's CIDRs, subnets, route tables, security groups and NACLs."""
     ec2 = session.client("ec2", region_name=region)
@@ -158,11 +187,147 @@ def discover_network(region: str = None) -> dict:
         "vpc_count": len(vpc_attachments),
         "vpc_attachments": vpc_attachments,
         "other_attachments": other,
-        # TODO: add Cloud WAN discovery here (core network, segments, segment
-        # route tables / RIB, attachments). Cloud WAN uses the networkmanager
-        # client, not ec2, and its APIs are global (us-east-1). Fill this in.
-        "cloud_wan": {},
+        "cloud_wan": discover_cloud_wan(region),
     }
+
+
+def discover_cloud_wan(region: str = None) -> dict:
+    """Discover AWS Cloud WAN in a region, across accounts.
+
+    Cloud WAN's control plane (networkmanager) is global, so the client is
+    pinned to us-east-1. Runs in the core network owner account (local creds).
+    For each core network it reads the segments and, for the requested region's
+    edge, the segment route tables (RIB). For every VPC attachment in the
+    requested region it reads that VPC's full detail (CIDRs, subnets, route
+    tables, security groups, NACLs) in the VPC's owner account, assuming the
+    read-only role cross-account and using local creds for this account's own
+    VPCs. Non-VPC attachments (TGW, Connect, VPN, SD-WAN) are listed separately.
+    An account with no read-only role is reported with a note, not failed.
+
+    Args:
+        region: the region (Cloud WAN edge location) to map.
+
+    Returns core_networks, each with segments, vpc_attachments (account + full
+    VPC detail) and other_attachments.
+    """
+    nm = boto3.client("networkmanager", region_name="us-east-1")
+    me = boto3.client("sts").get_caller_identity()["Account"]
+
+    try:
+        core_networks = _nm_paginate(nm.list_core_networks, "CoreNetworks")
+    except Exception as e:
+        return {"error": f"could not list core networks: {e}", "core_networks": []}
+
+    result = []
+    for cn in core_networks:
+        core_network_id = cn.get("CoreNetworkId")
+        entry = {
+            "core_network_id": core_network_id,
+            "global_network_id": cn.get("GlobalNetworkId"),
+            "owner_account_id": cn.get("OwnerAccountId"),
+            "state": cn.get("State"),
+            "segments": [],
+            "vpc_attachments": [],
+            "other_attachments": [],
+        }
+
+        # Segments and the edges each one spans.
+        try:
+            detail = nm.get_core_network(CoreNetworkId=core_network_id)["CoreNetwork"]
+            for seg in detail.get("Segments", []):
+                entry["segments"].append({
+                    "name": seg.get("Name"),
+                    "edge_locations": seg.get("EdgeLocations", []),
+                    "shared_segments": seg.get("SharedSegments", []),
+                })
+        except Exception as e:
+            entry["segments_note"] = f"could not read core network detail: {e}"
+
+        # Segment route tables (RIB) for the requested region's edge.
+        if region:
+            for seg in entry["segments"]:
+                if region not in (seg.get("edge_locations") or []):
+                    continue
+                try:
+                    routes = nm.get_network_routes(
+                        RouteTableIdentifier={
+                            "CoreNetworkSegmentEdge": {
+                                "CoreNetworkId": core_network_id,
+                                "SegmentName": seg["name"],
+                                "EdgeLocation": region,
+                            }
+                        }
+                    )
+                    seg["routes"] = [
+                        {
+                            "destination": r.get("DestinationCidrBlock"),
+                            "state": r.get("State"),
+                            "type": r.get("Type"),
+                            "targets": [
+                                {
+                                    "segment": d.get("SegmentName"),
+                                    "edge_location": d.get("EdgeLocation"),
+                                    "resource_type": d.get("ResourceType"),
+                                    "resource_id": d.get("ResourceId"),
+                                    "attachment_id": d.get("CoreNetworkAttachmentId"),
+                                }
+                                for d in r.get("Destinations", [])
+                            ],
+                        }
+                        for r in routes.get("NetworkRoutes", [])
+                    ]
+                except Exception as e:
+                    seg["routes_note"] = f"could not read segment route table: {e}"
+
+        # Attachments (VPC detail read in each VPC's owner account).
+        try:
+            attachments = _nm_paginate(nm.list_attachments, "Attachments",
+                                       CoreNetworkId=core_network_id)
+        except Exception as e:
+            entry["attachments_note"] = f"could not list attachments: {e}"
+            result.append(entry)
+            continue
+
+        for a in attachments:
+            a_type = a.get("AttachmentType")
+            edge = a.get("EdgeLocation")
+            if a_type == "VPC":
+                vregion, account_id, vpc_id = _parse_vpc_arn(a.get("ResourceArn", ""))
+                vregion = vregion or edge
+                if region and vregion != region:
+                    continue
+                vatt = {
+                    "attachment_id": a.get("AttachmentId"),
+                    "segment": a.get("SegmentName"),
+                    "edge_location": edge,
+                    "account_id": account_id,
+                    "vpc_id": vpc_id,
+                    "state": a.get("State"),
+                }
+                try:
+                    session = get_session(
+                        account_id=(None if account_id == me else account_id),
+                        region=vregion)
+                    vatt["vpc"] = _vpc_detail(session, vpc_id, vregion)
+                except Exception as e:
+                    vatt["vpc"] = None
+                    vatt["note"] = (f"could not read account {account_id} "
+                                    f"(needs TracerAI-ReadOnly role): {e}")
+                entry["vpc_attachments"].append(vatt)
+            else:
+                if region and edge and edge != region:
+                    continue
+                entry["other_attachments"].append({
+                    "attachment_id": a.get("AttachmentId"),
+                    "type": a_type,
+                    "segment": a.get("SegmentName"),
+                    "edge_location": edge,
+                    "resource_arn": a.get("ResourceArn"),
+                    "account_id": a.get("OwnerAccountId"),
+                })
+        result.append(entry)
+
+    return {"core_networks": result}
 
 
 def get_vpc_route_tables(vpc_id: str, account_id: str = None, region: str = None) -> dict:

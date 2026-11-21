@@ -12,20 +12,30 @@ Parameters:
     Description: The AWS account ID where TracerAI runs and assumes this role.
     AllowedPattern: '^[0-9]{12}$'
 
-  TracerAIRoleName:
-    Type: String
-    Default: TracerAI-Agent
-    Description: The role name in the trusted account that is allowed to assume this role.
-
   ExternalId:
     Type: String
     Description: A shared external id the caller must present (prevents confused-deputy).
     NoEcho: true
 
+  TrustedPrincipalArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional. Tighten the trust to a single principal ARN in the trusted
+      account (for example a dedicated arn:aws:iam::<acct>:role/TracerAI-Agent).
+      Leave blank to trust the trusted account's root, in which case the
+      ExternalId plus the caller's own sts:AssumeRole permission are the control.
+      Do NOT use a raw AWS SSO (AWSReservedSSO_*) role name here: SSO role ARNs
+      live under /aws-reserved/sso.amazonaws.com/ and their suffix rotates, which
+      makes the trust invalid or brittle.
+
   RoleName:
     Type: String
     Default: TracerAI-ReadOnly
     Description: The name of the role created in this account.
+
+Conditions:
+  UseSpecificPrincipal: !Not [!Equals [!Ref TrustedPrincipalArn, '']]
 
 Resources:
   TracerAIReadOnlyRole:
@@ -37,7 +47,10 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              AWS: !Sub 'arn:aws:iam::${TrustedAccountId}:role/${TracerAIRoleName}'
+              AWS: !If
+                - UseSpecificPrincipal
+                - !Ref TrustedPrincipalArn
+                - !Sub 'arn:aws:iam::${TrustedAccountId}:root'
             Action: 'sts:AssumeRole'
             Condition:
               StringEquals:
@@ -54,9 +67,23 @@ Resources:
                   - 'ec2:DescribeSubnets'
                   - 'ec2:DescribeSecurityGroups'
                   - 'ec2:DescribeNetworkAcls'
+                  - 'ec2:DescribeTransitGateways'
                   - 'ec2:DescribeTransitGatewayAttachments'
+                  - 'ec2:DescribeTransitGatewayVpcAttachments'
+                  - 'ec2:DescribeTransitGatewayRouteTables'
+                  - 'ec2:DescribeVpcEndpoints'
+                  - 'ec2:DescribeVpcPeeringConnections'
+                  - 'ec2:DescribeManagedPrefixLists'
                   - 'ec2:DescribeInstances'
                   - 'ec2:DescribeNetworkInterfaces'
+                Resource: '*'
+              # Cloud WAN control plane is read-only and global. Harmless in
+              # accounts that do not own a core network; required where one does.
+              - Effect: Allow
+                Action:
+                  - 'networkmanager:List*'
+                  - 'networkmanager:Get*'
+                  - 'networkmanager:Describe*'
                 Resource: '*'
 
 Outputs:

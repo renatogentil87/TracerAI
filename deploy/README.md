@@ -1,33 +1,58 @@
 # Cross-account discovery setup
 
-TracerAI can read network config in other accounts (VPC route tables, security
-groups, NACLs) by assuming a read-only role in each one. This folder has the
-CloudFormation template that creates that role.
+TracerAI reads network config in other accounts (VPC route tables, security
+groups, NACLs, Transit Gateway and Cloud WAN attachments) by assuming a
+read-only role in each one. This folder has the CloudFormation template that
+creates that role, plus the runbook to roll it out.
 
-## How it works
+## The model
 
-- TracerAI runs in one account (the "trusted account") with its own credentials.
-- Each account you want to discover has a `TracerAI-ReadOnly` role that trusts
-  the trusted account to assume it.
-- The role is read only. It cannot change anything.
+- TracerAI runs in one account, the **trusted account**, with its own
+  credentials (an SSO role, an IAM role, or keys).
+- Every account you want to discover has a **`TracerAI-ReadOnly`** role that
+  trusts the trusted account to assume it. The role is read only.
+- Two controls gate the trust:
+  1. an **external id** (a shared secret) the caller must present, and
+  2. the caller's own identity must be granted **`sts:AssumeRole`** on the role.
 - When you ask about a VPC in another account, TracerAI assumes that account's
-  role, reads the config, and answers.
+  role, reads the config, and answers. For the trusted account's own VPCs it
+  uses local credentials (no assume).
 
-Nothing deploys automatically when you clone the repo. You install TracerAI on
-your laptop, then an administrator deploys the role into the target accounts
-with the template here.
+Nothing deploys automatically when you clone the repo. An administrator deploys
+the role into the target accounts with the template here, and you run TracerAI
+on your machine.
 
-## What you need
+## Template parameters (`cross-account-role.yaml`)
 
-- `cross-account-role.yaml` creates the role in a target account.
-- The role needs three inputs:
-  - `TrustedAccountId`  the account TracerAI runs in
-  - `TracerAIRoleName`  the role TracerAI runs as in that account
-  - `ExternalId`        a shared secret the caller must present
+| Parameter | Required | Default | Purpose |
+|-----------|----------|---------|---------|
+| `TrustedAccountId` | yes | – | The 12-digit account TracerAI runs in. |
+| `ExternalId` | yes | – | Shared secret the caller must present (`NoEcho`). |
+| `TrustedPrincipalArn` | no | `''` (account root) | Tighten the trust to one principal ARN in the trusted account. Leave blank to trust the trusted account root (external id + the caller's `sts:AssumeRole` permission are then the control). |
+| `RoleName` | no | `TracerAI-ReadOnly` | Name of the role created in the target account. |
 
-## Deploy to one account (quick test)
+> **Do not** put a raw AWS SSO role name (`AWSReservedSSO_*`) in
+> `TrustedPrincipalArn`. SSO role ARNs live under
+> `/aws-reserved/sso.amazonaws.com/` and the suffix rotates, so naming one makes
+> the trust invalid or brittle. Trust the account root (default) and rely on the
+> external id, or create a dedicated stable IAM role in the trusted account and
+> use its ARN.
 
-From the target account, with permission to create IAM roles:
+## Step 0 — pick an external id (once)
+
+Generate a secret and keep it out of source control. Reuse the same value for
+every deployment and at run time.
+
+```bash
+mkdir -p ~/.tracerai && chmod 700 ~/.tracerai
+openssl rand -hex 16 > ~/.tracerai/external_id
+chmod 600 ~/.tracerai/external_id
+```
+
+## Path 1 — one account (prove it first)
+
+In the **target** account, with permission to create IAM roles (PowerUser is not
+enough — it excludes IAM write):
 
 ```bash
 aws cloudformation deploy \
@@ -35,119 +60,104 @@ aws cloudformation deploy \
   --stack-name tracerai-readonly \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
-      TrustedAccountId=<the account TracerAI runs in> \
-      TracerAIRoleName=<the role TracerAI runs as> \
-      ExternalId=<a secret string>
+      TrustedAccountId=<TRUSTED_ACCOUNT_ID> \
+      ExternalId="$(tr -d '\n' < ~/.tracerai/external_id)"
 ```
 
-## Deploy across an Organization (the real rollout)
+Then, in the **trusted** account, allow TracerAI's identity to assume it:
 
-Use a CloudFormation StackSet so the role lands in every account, including new
-ones. StackSets that target an Organization are created from the management
-account or a delegated administrator, because only those can create IAM roles in
-member accounts.
+```
+Action:   sts:AssumeRole
+Resource: arn:aws:iam::<TARGET_ACCOUNT_ID>:role/TracerAI-ReadOnly
+```
 
-1. Enable trusted access for CloudFormation StackSets in the Organization.
-2. Create a service-managed StackSet from `cross-account-role.yaml`.
-3. Target the Organization or specific OUs, and turn on automatic deployment so
-   new accounts get the role.
+How you attach that depends on how TracerAI runs:
+- **IAM user/role:** add the statement to that principal's policy.
+- **IAM Identity Center (SSO):** add it to the permission set's inline policy and
+  re-provision. Scope the resource to `arn:aws:iam::*:role/TracerAI-ReadOnly` so
+  it covers every target account at once.
+
+Verify from the trusted account:
+
+```bash
+aws sts assume-role \
+  --role-arn "arn:aws:iam::<TARGET_ACCOUNT_ID>:role/TracerAI-ReadOnly" \
+  --role-session-name tracerai-test \
+  --external-id "$(tr -d '\n' < ~/.tracerai/external_id)"
+```
+
+## Path 2 — org-wide (all accounts, the real rollout)
+
+A **service-managed StackSet** creates the role in every account in the target
+OUs, including new ones. It is launched from the **management account** or a
+delegated administrator. Service-managed StackSets deploy to a target OU **and
+its child OUs**, but **not** to the management account itself — deploy that one
+directly with Path 1 if the management account owns VPCs you want to discover.
+
+The role is a global IAM resource, so deploy the StackSet to a **single region**.
+
+1. Enable trusted access for StackSets with Organizations (management account):
+
+   ```bash
+   aws cloudformation activate-organizations-access
+   ```
+
+2. Create the StackSet from the template:
+
+   ```bash
+   aws cloudformation create-stack-set \
+     --stack-set-name TracerAI-ReadOnly \
+     --description "TracerAI cross-account read-only network discovery role" \
+     --template-body file://deploy/cross-account-role.yaml \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --permission-model SERVICE_MANAGED \
+     --auto-deployment Enabled=true,RetainStacksOnAccountRemoval=false \
+     --parameters \
+        ParameterKey=TrustedAccountId,ParameterValue=<TRUSTED_ACCOUNT_ID> \
+        ParameterKey=ExternalId,ParameterValue="$(tr -d '\n' < ~/.tracerai/external_id)"
+   ```
+
+3. Deploy instances to the OU(s) that hold your accounts (one region):
+
+   ```bash
+   aws cloudformation create-stack-instances \
+     --stack-set-name TracerAI-ReadOnly \
+     --deployment-targets OrganizationalUnitIds=<OU_ID> \
+     --regions us-east-1
+   ```
+
+4. In the trusted account, grant `sts:AssumeRole` on
+   `arn:aws:iam::*:role/TracerAI-ReadOnly` (see Path 1, step 2). With auto
+   deployment on, new accounts added to the OUs get the role automatically.
 
 ## Run TracerAI with cross-account discovery
 
-On the machine running TracerAI, in the trusted account's credentials:
+On the machine running TracerAI, with the trusted account's credentials:
 
 ```bash
-export TRACERAI_ROLE_NAME=TracerAI-ReadOnly       # must match RoleName in the template
-export TRACERAI_EXTERNAL_ID=<the same secret>     # must match ExternalId in the template
-export AWS_REGION=<your region>
+export AWS_PROFILE=<trusted-account-profile>   # or AWS_* env vars
+export AWS_REGION=<region of your Bedrock model>
+export TRACERAI_ROLE_NAME=TracerAI-ReadOnly              # matches RoleName
+export TRACERAI_EXTERNAL_ID="$(tr -d '\n' < ~/.tracerai/external_id)"
 python -m tracerai.agent
+# then: "discover my network in eu-west-1"
 ```
-
-The trusted account's own identity also needs permission to assume the role, for
-example `sts:AssumeRole` on `arn:aws:iam::*:role/TracerAI-ReadOnly`.
 
 ## Security notes
 
-- The role is read only (describe actions only).
-- The trust is scoped to one role in the trusted account, not the whole account,
-  and requires the external id.
+- The role is read only (describe / list / get actions only; no mutating calls).
+- The default trust is the trusted account root **plus** a required external id.
+  Because the caller must also be explicitly granted `sts:AssumeRole`, root is
+  gated by two independent controls. Tighten to `TrustedPrincipalArn` if you want
+  the trust pinned to a single principal.
 - Keep the external id out of source control. Pass it as an environment variable
-  or a parameter at deploy time.
+  or a deploy-time parameter; the template marks it `NoEcho`.
 
-## Runbook: make full cross-account discovery work
+## Checklist
 
-Full discovery needs three things in place: the read-only role in each target
-account, permission for TracerAI's identity to assume it, and the matching
-external id at run time. Start with one account to prove it, then go org-wide.
-
-### The role-name parameter (get this right first)
-
-`TracerAIRoleName` must be the role TracerAI actually runs as in the trusted
-account. If you run TracerAI under a federated/SSO identity, that role name can
-rotate, which makes a brittle trust. For a stable setup, create a dedicated IAM
-role (for example `TracerAI-Agent`) in the trusted account, run TracerAI as it,
-and use that as `TracerAIRoleName`. For a quick test you can trust the SSO role
-name you currently run as.
-
-### Path 1: one account (prove it first)
-
-1. In the target account, with permission to create IAM roles, deploy the role:
-
-   ```bash
-   aws cloudformation deploy \
-     --template-file deploy/cross-account-role.yaml \
-     --stack-name tracerai-readonly \
-     --capabilities CAPABILITY_NAMED_IAM \
-     --parameter-overrides \
-       TrustedAccountId=<trusted account id> \
-       TracerAIRoleName=<role TracerAI runs as> \
-       ExternalId=<a secret string>
-   ```
-
-2. In the trusted account, allow TracerAI's identity to assume it:
-
-   ```
-   Action:   sts:AssumeRole
-   Resource: arn:aws:iam::<target account id>:role/TracerAI-ReadOnly
-   ```
-
-3. Run TracerAI with the trusted account's credentials and the same external id:
-
-   ```bash
-   export TRACERAI_ROLE_NAME=TracerAI-ReadOnly
-   export TRACERAI_EXTERNAL_ID=<the same secret>
-   export AWS_REGION=<region of the model>
-   python -m tracerai.agent
-   ```
-
-   Ask it to discover the network. That account's VPCs now read fully; accounts
-   without the role still come back with a "needs role" note.
-
-### Path 2: org-wide (all accounts, the real rollout)
-
-Service-managed StackSets create the role in every account, including new ones.
-They are launched from the management account or a delegated administrator,
-because only those can create IAM roles across an Organization.
-
-1. In the management account, enable trusted access for CloudFormation StackSets
-   with AWS Organizations.
-2. Create a service-managed StackSet from `cross-account-role.yaml` with the same
-   parameters as Path 1, targeting the OU(s) that hold your accounts, with
-   automatic deployment turned on.
-3. In the trusted account, allow TracerAI's identity to assume the role in any
-   account:
-
-   ```
-   Action:   sts:AssumeRole
-   Resource: arn:aws:iam::*:role/TracerAI-ReadOnly
-   ```
-
-4. Run TracerAI as in Path 1, step 3.
-
-### Checklist
-
-- [ ] Model (Bedrock) works in the account TracerAI runs as.
-- [ ] Guardrail (if used) is in that same account and region.
-- [ ] TracerAI-ReadOnly role deployed in each target account (Path 1 or 2).
-- [ ] TracerAI's identity has sts:AssumeRole for that role.
-- [ ] TRACERAI_EXTERNAL_ID at run time matches the template's ExternalId.
+- [ ] External id generated and stored outside the repo.
+- [ ] Bedrock (model) works in the account/region TracerAI runs in.
+- [ ] `TracerAI-ReadOnly` deployed in each target account (Path 1 or 2).
+- [ ] Management account deployed directly if it owns VPCs (StackSets skip it).
+- [ ] Trusted identity has `sts:AssumeRole` on `arn:aws:iam::*:role/TracerAI-ReadOnly`.
+- [ ] `TRACERAI_EXTERNAL_ID` at run time matches the template's `ExternalId`.
