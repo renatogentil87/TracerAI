@@ -38,7 +38,14 @@ def _norm(account_id, me):
     return None if (not account_id or account_id == me) else account_id
 
 EPHEMERAL = (1024, 65535)
-_PROTO = {"tcp": "6", "udp": "17", "icmp": "1"}
+_CANON = {"6": "tcp", "17": "udp", "1": "icmp", "58": "icmpv6",
+          "tcp": "tcp", "udp": "udp", "icmp": "icmp", "icmpv6": "icmpv6", "-1": "-1"}
+
+
+def _canon(proto) -> str:
+    """Normalize a protocol to a name. Security groups report names
+    (tcp/udp/icmp/-1), NACLs report numbers (6/17/1/-1); accept either."""
+    return _CANON.get(str(proto).lower(), str(proto).lower())
 
 
 def _is_ipv4(value: str) -> bool:
@@ -148,11 +155,13 @@ def _sg_allows(rules: list, ip: str, port: int, proto: str):
     (True, cidr) on a CIDR match, (None, "sg/pl") when only group or prefix-list
     sources exist (cannot be resolved cross-account), or (False, None)."""
     saw_unresolvable = False
+    want = _canon(proto)
     for r in rules:
-        rp = r.get("protocol", "-1")
-        if rp != "-1" and rp != _PROTO.get(proto, proto):
+        rp = _canon(r.get("protocol", "-1"))
+        if rp != "-1" and rp != want:
             continue
-        if rp != "-1":
+        # Port range applies to TCP/UDP only; for ICMP the from/to are type/code.
+        if rp != "-1" and want in ("tcp", "udp"):
             fp, tp = r.get("from_port"), r.get("to_port")
             if fp is not None and tp is not None and not (fp <= port <= tp):
                 continue
@@ -170,18 +179,18 @@ def _nacl_allows(nacl: dict, egress: bool, ip: str, port: int, proto: str):
     (True/False, rule_number). No NACL means the default allow-all."""
     if not nacl:
         return True, None
-    want = _PROTO.get(proto, proto)
+    want = _canon(proto)
     for e in sorted(nacl.get("Entries", []), key=lambda x: x["RuleNumber"]):
         if bool(e.get("Egress")) != egress:
             continue
-        ep = str(e.get("Protocol"))
+        ep = _canon(e.get("Protocol"))
         if ep != "-1" and ep != want:
             continue
         cidr = e.get("CidrBlock")
         if not cidr or ":" in cidr or not _ip_in(ip, cidr):
             continue
         pr = e.get("PortRange")
-        if ep != "-1" and pr and not (pr.get("From", 0) <= port <= pr.get("To", 65535)):
+        if want in ("tcp", "udp") and pr and not (pr.get("From", 0) <= port <= pr.get("To", 65535)):
             continue
         return e.get("RuleAction") == "allow", e.get("RuleNumber")
     return False, None  # fell through the implicit deny
@@ -318,7 +327,8 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
     # 1. Source SG egress.
     ok, why = _sg_allows(src["sg_outbound"], dst_ip, port, protocol)
     if ok is True:
-        add("source security group egress", "pass", f"egress allows {dst_ip}:{port} via {why}")
+        add("source security group egress", "pass",
+            f"egress allows {proto_port(protocol, port)} to {dst_ip} via {why}")
     elif ok is None:
         add("source security group egress", "unknown",
             f"egress only references {why}; could not confirm {dst_ip} by CIDR")
@@ -383,7 +393,7 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         ok, why = _sg_allows(dst_ctx["sg_inbound"], src_ip, port, protocol)
         if ok is True:
             add("destination security group ingress", "pass",
-                f"ingress allows {src_ip}:{port} via {why}")
+                f"ingress allows {proto_port(protocol, port)} from {src_ip} via {why}")
         elif ok is None:
             add("destination security group ingress", "unknown",
                 f"ingress only references {why}; cross-account sources must be a CIDR")
@@ -447,6 +457,8 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
 
 
 def proto_port(protocol: str, port: int) -> str:
+    if _canon(protocol) in ("icmp", "icmpv6", "-1"):
+        return _canon(protocol)
     return f"{protocol}/{port}"
 
 

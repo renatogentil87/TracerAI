@@ -261,8 +261,9 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
     Args:
         src_instance_id: the source instance id (resolve it first).
         dst: the destination instance id (preferred, so its inbound rules are checked) or a private IP.
-        port: the destination TCP/UDP port, e.g. 443.
-        protocol: "tcp" (default) or "udp".
+        port: the destination TCP/UDP port, e.g. 443. For ICMP it is ignored (pass -1).
+        protocol: "tcp" (default), "udp", or "icmp". For ICMP it confirms a rule allows ICMP from
+            the source, including an all-traffic (protocol -1) security group rule.
         region: the region both ends are in.
         src_account_id: the account that owns the source.
         dst_account_id: the account that owns the destination.
