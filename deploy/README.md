@@ -26,8 +26,8 @@ on your machine.
 
 | Parameter | Required | Default | Purpose |
 |-----------|----------|---------|---------|
-| `TrustedAccountId` | yes | – | The 12-digit account TracerAI runs in. |
-| `ExternalId` | yes | – | Shared secret the caller must present (`NoEcho`). |
+| `TrustedAccountId` | yes | n/a | The 12-digit account TracerAI runs in. |
+| `ExternalId` | yes | n/a | Shared secret the caller must present (`NoEcho`). |
 | `TrustedPrincipalArn` | no | `''` (account root) | Tighten the trust to one principal ARN in the trusted account. Leave blank to trust the trusted account root (external id + the caller's `sts:AssumeRole` permission are then the control). |
 | `RoleName` | no | `TracerAI-ReadOnly` | Name of the role created in the target account. |
 
@@ -38,7 +38,7 @@ on your machine.
 > external id, or create a dedicated stable IAM role in the trusted account and
 > use its ARN.
 
-## Step 0 — pick an external id (once)
+## Step 0: pick an external id (once)
 
 Generate a secret and keep it out of source control. Reuse the same value for
 every deployment and at run time.
@@ -49,10 +49,10 @@ openssl rand -hex 16 > ~/.tracerai/external_id
 chmod 600 ~/.tracerai/external_id
 ```
 
-## Path 1 — one account (prove it first)
+## Path 1: one account (prove it first)
 
 In the **target** account, with permission to create IAM roles (PowerUser is not
-enough — it excludes IAM write):
+enough, because it excludes IAM write):
 
 ```bash
 aws cloudformation deploy \
@@ -86,12 +86,12 @@ aws sts assume-role \
   --external-id "$(tr -d '\n' < ~/.tracerai/external_id)"
 ```
 
-## Path 2 — org-wide (all accounts, the real rollout)
+## Path 2: org-wide (all accounts, the real rollout)
 
 A **service-managed StackSet** creates the role in every account in the target
 OUs, including new ones. It is launched from the **management account** or a
 delegated administrator. Service-managed StackSets deploy to a target OU **and
-its child OUs**, but **not** to the management account itself — deploy that one
+its child OUs**, but **not** the management account itself. Deploy that one
 directly with Path 1 if the management account owns VPCs you want to discover.
 
 The role is a global IAM resource, so deploy the StackSet to a **single region**.

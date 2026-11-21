@@ -7,10 +7,10 @@ TracerAI is a networking troubleshooting agent for AWS. It is built with the Str
 Ask a question like "Can the web server reach the database on 3306?" The agent resolves instance names to ids, runs Reachability Analyzer, inspects the security group when something is blocked, and returns a diagnosis with the likely fix. It can also list instances in a region.
 
 It also does **cross-account network discovery**. Ask "discover my network in
-eu-west-1" and it maps both backbones — **Transit Gateway** and **AWS Cloud WAN**
-— and, for every attached VPC, reads the CIDRs, subnets, route tables, security
-groups and NACLs in that VPC's owner account. It reads other accounts by assuming
-a read-only role there (see [`deploy/`](deploy/README.md)); accounts without the
+eu-west-1" and it maps both backbones (Transit Gateway and AWS Cloud WAN). For
+every attached VPC it reads the CIDRs, subnets, route tables, security groups and
+NACLs in that VPC's owner account. Other accounts are read by assuming a
+read-only role there (see [`deploy/`](deploy/README.md)); accounts without the
 role are reported with a note instead of failing.
 
 ## How it works
@@ -80,17 +80,17 @@ account first. This is a one-time setup, done by an administrator.
 What has to be in place:
 
 1. **A `TracerAI-ReadOnly` role in each target account** that trusts the account
-   TracerAI runs in. Deploy it from [`deploy/`](deploy/README.md) — one account
-   with `aws cloudformation deploy`, or org-wide with a service-managed StackSet.
-   The management account is deployed directly (StackSets skip it).
+   TracerAI runs in. Deploy it from [`deploy/`](deploy/README.md): a single
+   account with `aws cloudformation deploy`, or org-wide with a service-managed
+   StackSet. The management account is deployed directly (StackSets skip it).
 2. **`sts:AssumeRole` permission** for the identity TracerAI runs as, on
    `arn:aws:iam::*:role/TracerAI-ReadOnly`.
 3. **A shared external id**, the same value in the role's trust policy and at run
    time.
 
 Then run with the cross-account environment variables set. "Set" means export
-them in your terminal for the current session, right before you launch the tool
-— they are not permanent. Of the two, only `TRACERAI_EXTERNAL_ID` is required;
+them in your terminal for the current session, right before you launch the tool;
+they are not permanent. Of the two, only `TRACERAI_EXTERNAL_ID` is required.
 `TRACERAI_ROLE_NAME` is optional and defaults to `TracerAI-ReadOnly`.
 
 ```bash
