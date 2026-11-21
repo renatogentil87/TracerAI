@@ -27,6 +27,26 @@ from tracerai.banner import print_banner
 console = Console()
 
 
+class ToolTraceHandler:
+    """Strands callback handler that shows tool calls but not the raw text stream.
+
+    The default handler streamed both the model text (raw markdown) and the
+    "Tool #N" lines. We render the final answer with rich instead, so this
+    handler keeps only the tool-call trace and drops the text and reasoning so
+    nothing prints twice.
+    """
+
+    def __init__(self):
+        self.tool_count = 0
+
+    def __call__(self, **kwargs):
+        tool_use = (kwargs.get("event", {}).get("contentBlockStart", {})
+                    .get("start", {}).get("toolUse"))
+        if tool_use and tool_use.get("name"):
+            self.tool_count += 1
+            console.print(f"[dim]Tool #{self.tool_count}: {tool_use['name']}[/dim]")
+
+
 @tool
 def resolve_instance(name: str, region: str = None) -> dict:
     """Resolve an EC2 instance by its Name tag to an instance id.
@@ -370,7 +390,7 @@ def build_agent() -> Agent:
         model=model,
         tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups],
         system_prompt=system_prompt,
-        callback_handler=None,
+        callback_handler=ToolTraceHandler(),
     )
 
 
