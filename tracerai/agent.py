@@ -3,6 +3,8 @@
     python -m tracerai.agent
 """
 
+import os
+
 import boto3
 
 from strands import Agent, tool
@@ -271,13 +273,31 @@ Style:
 
 
 def build_agent() -> Agent:
-    model = BedrockModel(
-        model_id="global.anthropic.claude-sonnet-4-6",
-        region_name="ca-central-1",
-        guardrail_id="0q6mkenp9859",
-        guardrail_version="1",
-        guardrail_trace="enabled",
-    )
+    """Build the agent, reading Bedrock config from the environment.
+
+    Defaults match a working setup, but every value is overridable so the repo
+    is clone-and-run in any account:
+
+        TRACERAI_MODEL_ID          Bedrock model id (default below)
+        TRACERAI_BEDROCK_REGION    region for the model call; falls back to
+                                   AWS_REGION, then ca-central-1
+        TRACERAI_GUARDRAIL_ID      optional Bedrock guardrail id; the guardrail
+                                   is only applied when this is set (a guardrail
+                                   is account specific, so there is no default)
+        TRACERAI_GUARDRAIL_VERSION guardrail version (default "1")
+    """
+    model_kwargs = {
+        "model_id": os.getenv("TRACERAI_MODEL_ID", "global.anthropic.claude-sonnet-4-6"),
+        "region_name": os.getenv("TRACERAI_BEDROCK_REGION",
+                                 os.getenv("AWS_REGION", "ca-central-1")),
+    }
+    guardrail_id = os.getenv("TRACERAI_GUARDRAIL_ID")
+    if guardrail_id:
+        model_kwargs["guardrail_id"] = guardrail_id
+        model_kwargs["guardrail_version"] = os.getenv("TRACERAI_GUARDRAIL_VERSION", "1")
+        model_kwargs["guardrail_trace"] = "enabled"
+
+    model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
         tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups],

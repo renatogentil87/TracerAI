@@ -55,8 +55,21 @@ python -m tracerai.agent
 On start it prints which account and region it is operating against, so you can
 confirm you are pointed at the right place.
 
-The Bedrock model id and its region are set in `tracerai/agent.py` (`build_agent`).
-Change them there if you use a different model or region.
+## Model configuration
+
+TracerAI calls a Bedrock Claude model. `build_agent()` in `tracerai/agent.py`
+reads its configuration from the environment, with working defaults, so you do
+not edit code to point at your account:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `TRACERAI_MODEL_ID` | `global.anthropic.claude-sonnet-4-6` | Bedrock model id |
+| `TRACERAI_BEDROCK_REGION` | `AWS_REGION`, else `ca-central-1` | region the model is called in |
+| `TRACERAI_GUARDRAIL_ID` | _unset_ | optional Bedrock guardrail; applied only when set (guardrails are account-specific, so there is no default) |
+| `TRACERAI_GUARDRAIL_VERSION` | `1` | guardrail version, used only with the id |
+
+A fresh clone runs with no guardrail. Set `TRACERAI_GUARDRAIL_ID` only if you
+have a guardrail in your own account.
 
 ## Cross-account discovery (prerequisites)
 
