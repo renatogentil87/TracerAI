@@ -78,11 +78,22 @@ Resources:
                   - 'ec2:DescribeVpcEndpoints'
                   - 'ec2:DescribeVpcPeeringConnections'
                   - 'ec2:DescribeManagedPrefixLists'
-                  - 'directconnect:Describe*'
+                  # Direct Connect: only the four read calls the DX tools make.
+                  - 'directconnect:DescribeConnections'
+                  - 'directconnect:DescribeVirtualInterfaces'
+                  - 'directconnect:DescribeDirectConnectGatewayAssociations'
+                  - 'directconnect:DescribeLocations'
+                  # Network Firewall: read only. These describe/list the policy
+                  # and rule groups so the agent can explain a firewall verdict.
+                  # No create/update/delete/associate action is granted, so the
+                  # agent cannot change any firewall, policy or rule group.
                   - 'network-firewall:DescribeFirewall'
                   - 'network-firewall:DescribeFirewallPolicy'
                   - 'network-firewall:DescribeRuleGroup'
                   - 'network-firewall:ListFirewalls'
+                  # CloudWatch Logs Insights: StartQuery/StopQuery run and cancel
+                  # a transient read query over flow logs. They do not write log
+                  # data or change any configuration.
                   - 'logs:StartQuery'
                   - 'logs:GetQueryResults'
                   - 'logs:StopQuery'
@@ -95,11 +106,14 @@ Resources:
                 Resource: '*'
               # Cloud WAN control plane is read-only and global. Harmless in
               # accounts that do not own a core network; required where one does.
+              # Enumerated to the exact calls Cloud WAN discovery makes.
               - Effect: Allow
                 Action:
-                  - 'networkmanager:List*'
-                  - 'networkmanager:Get*'
-                  - 'networkmanager:Describe*'
+                  - 'networkmanager:ListCoreNetworks'
+                  - 'networkmanager:GetCoreNetwork'
+                  - 'networkmanager:GetNetworkRoutes'
+                  - 'networkmanager:ListAttachments'
+                  - 'networkmanager:GetVpcAttachment'
                 Resource: '*'
 
 Outputs:
