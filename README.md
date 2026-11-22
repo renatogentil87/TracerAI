@@ -240,4 +240,4 @@ For **cross-account discovery**, two more things apply:
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
