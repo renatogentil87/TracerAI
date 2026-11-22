@@ -689,7 +689,7 @@ def build_agent() -> Agent:
     guardrail_id = os.getenv("TRACERAI_GUARDRAIL_ID")
     if guardrail_id:
         model_kwargs["guardrail_id"] = guardrail_id
-        model_kwargs["guardrail_version"] = os.getenv("TRACERAI_GUARDRAIL_VERSION", "1")
+        model_kwargs["guardrail_version"] = os.getenv("TRACERAI_GUARDRAIL_VERSION", "7")
         model_kwargs["guardrail_trace"] = "enabled"
 
     system_prompt = SYSTEM_PROMPT
