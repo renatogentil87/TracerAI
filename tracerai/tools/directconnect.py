@@ -197,6 +197,18 @@ def recommend_dx_resilience(region: str = None, account_id: str = None) -> dict:
     conns = [_connection_view(c) for c in dc.describe_connections().get("connections", [])]
     assessment = _assess(conns)
 
+    notes = []
+    if assessment["connection_count"] == 0:
+        try:
+            vifs = dc.describe_virtual_interfaces().get("virtualInterfaces", [])
+        except Exception:
+            vifs = []
+        if vifs:
+            notes.append(f"{len(vifs)} virtual interface(s) exist but no Direct Connect connection "
+                         "is visible in this account, so the physical connection is hosted or owned "
+                         "by another account. Resilience is assessed on the connections visible here; "
+                         "check the owning account for the real posture.")
+
     used = set(assessment["locations"])
     try:
         all_locs = dc.describe_locations().get("locations", [])
@@ -225,6 +237,7 @@ def recommend_dx_resilience(region: str = None, account_id: str = None) -> dict:
         "recommendations": rec,
         "suggested_additional_locations": other_locations,
         "reference": DOC_RESILIENCY,
+        "notes": notes,
         "note": ("Device and on-premises-location diversity are only partly visible from the API "
                  "(AWS device per connection); confirm the on-premises side separately."),
     }

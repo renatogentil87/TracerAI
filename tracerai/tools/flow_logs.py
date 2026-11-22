@@ -42,8 +42,16 @@ def _resolve_enis(ec2, target: str):
             Filters=[{"Name": "addresses.private-ip-address", "Values": [t]}]).get("NetworkInterfaces", [])
     for ni in nis:
         enis.append(ni["NetworkInterfaceId"])
-    subnet = nis[0].get("SubnetId") if nis else None
-    vpc = nis[0].get("VpcId") if nis else None
+    # Resolve subnet/vpc reliably from the ENIs themselves (the instance network
+    # interface shape does not always carry them), so a VPC-level or subnet-level
+    # flow log is found, not just an ENI-level one.
+    subnet = vpc = None
+    if enis:
+        resolved = ec2.describe_network_interfaces(
+            NetworkInterfaceIds=enis).get("NetworkInterfaces", [])
+        if resolved:
+            subnet = resolved[0].get("SubnetId")
+            vpc = resolved[0].get("VpcId")
     return enis, subnet, vpc
 
 
