@@ -166,10 +166,53 @@ def _vpc_detail(session, vpc_id: str, region: str) -> dict:
                 ],
             })
 
-    return {
+    # NAT gateways. For overlapping-CIDR designs the private NAT gateway's subnet
+    # CIDR is the non-overlapping "outside" range, so include it. Read is wrapped
+    # so a missing permission degrades to a note instead of failing discovery.
+    subnet_cidr = {s["subnet_id"]: s["cidr"] for s in subnets}
+    nat_gateways, nat_note = [], None
+    try:
+        for page in ec2.get_paginator("describe_nat_gateways").paginate(
+                Filter=[{"Name": "vpc-id", "Values": [vpc_id]}]):
+            for n in page.get("NatGateways", []):
+                nat_gateways.append({
+                    "nat_gateway_id": n["NatGatewayId"],
+                    "type": n.get("ConnectivityType", "public"),  # public | private
+                    "state": n.get("State"),
+                    "subnet_id": n.get("SubnetId"),
+                    "subnet_cidr": subnet_cidr.get(n.get("SubnetId")),
+                    "addresses": [{"private_ip": a.get("PrivateIp"), "public_ip": a.get("PublicIp")}
+                                  for a in n.get("NatGatewayAddresses", [])],
+                })
+    except Exception as e:
+        nat_note = f"could not read NAT gateways (needs ec2:DescribeNatGateways): {e}"
+
+    # VPC flow logs (enabled or not, and where they go).
+    flow_logs, flow_note = [], None
+    try:
+        for page in ec2.get_paginator("describe_flow_logs").paginate(
+                Filter=[{"Name": "resource-id", "Values": [vpc_id]}]):
+            for fl in page.get("FlowLogs", []):
+                flow_logs.append({
+                    "flow_log_id": fl["FlowLogId"],
+                    "status": fl.get("FlowLogStatus"),
+                    "traffic_type": fl.get("TrafficType"),
+                    "destination_type": fl.get("LogDestinationType"),
+                    "destination": fl.get("LogDestination") or fl.get("LogGroupName"),
+                })
+    except Exception as e:
+        flow_note = f"could not read flow logs (needs ec2:DescribeFlowLogs): {e}"
+
+    detail = {
         "name": name, "cidrs": cidrs, "subnets": subnets,
         "route_tables": route_tables, "security_groups": security_groups, "nacls": nacls,
+        "nat_gateways": nat_gateways, "flow_logs": flow_logs,
     }
+    if nat_note:
+        detail["nat_gateways_note"] = nat_note
+    if flow_note:
+        detail["flow_logs_note"] = flow_note
+    return detail
 
 
 def discover_network(region: str = None) -> dict:
@@ -360,6 +403,15 @@ def discover_cloud_wan(region: str = None, account_names: dict = None) -> dict:
                     "vpc_id": vpc_id,
                     "state": a.get("State"),
                 }
+                # Per-attachment options (appliance mode, DNS, SG referencing,
+                # IPv6) and the attached subnets, from get_vpc_attachment.
+                try:
+                    va = nm.get_vpc_attachment(
+                        AttachmentId=a.get("AttachmentId")).get("VpcAttachment", {})
+                    vatt["options"] = va.get("Options")
+                    vatt["subnet_arns"] = va.get("SubnetArns")
+                except Exception:
+                    pass
                 try:
                     session = get_session(
                         account_id=(None if account_id == me else account_id),

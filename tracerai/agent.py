@@ -158,10 +158,11 @@ def discover_network(region: str = None) -> dict:
     covers BOTH backbones:
       - Transit Gateway: lists the TGW attachments, then for each connected VPC
         reads that VPC's full detail (CIDRs, subnets, route tables, security
-        groups, NACLs) in its owner account.
+        groups, NACLs, NAT gateways, flow logs) in its owner account.
       - Cloud WAN: lists core networks, their segments and (for this region's
         edge) the segment route tables, then reads each attached VPC's full
-        detail in its owner account.
+        detail in its owner account, plus each attachment's options (appliance
+        mode, DNS, IPv6) and subnets.
     It assumes the read-only role for VPCs in other accounts and uses local
     creds for this account's own VPCs (shared, endpoints, centralized). Non-VPC
     attachments (VPN, peering, Direct Connect, TGW-to-Cloud-WAN) are listed
@@ -427,6 +428,23 @@ Cross-account lookups:
 - Ask for the region if the user did not give one.
 
 Only answer from tool results. If you are missing a name or port, ask.
+
+Grounding before you recommend a fix:
+- Never recommend a change (add a NAT gateway, add a route, open a security group
+  rule) until you have inspected the actual configuration with the tools. When
+  the user reports a symptom, run discover_network or trace_cross_account first,
+  then base the fix on what you found.
+- Recognize centralized designs. If egress or NAT is centralized through a
+  Transit Gateway, an inspection or egress VPC, or Cloud WAN, do NOT tell the
+  user to add a NAT gateway in the spoke; the default route pointing at the TGW
+  or a core network is that centralized path. For overlapping CIDRs, look at the
+  VPC's nat_gateways (a private NAT gateway, with its subnet_cidr as the
+  non-overlapping outside range) and the route tables, not at the Cloud WAN
+  attachment, which does not carry NAT settings.
+- State only what a tool actually returned. If a piece of config is not in the
+  data (for example a note that NAT gateways or flow logs could not be read),
+  say you could not see it with the current access and what is needed, rather
+  than inventing which API holds it or assuming a default.
 
 Style:
 - Keep replies short. State the finding and the next step in a sentence or two.
