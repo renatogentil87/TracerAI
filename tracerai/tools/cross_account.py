@@ -8,6 +8,7 @@ target account and trust the account TracerAI runs in.
 """
 
 import os
+import re
 
 import boto3
 
@@ -114,6 +115,55 @@ def _account_names():
     except Exception:
         pass
     return names
+
+
+def _mask(account_id: str) -> str:
+    """Last-4 display form, for example '...9670'."""
+    return "..." + account_id[-4:] if account_id and len(account_id) >= 4 else account_id
+
+
+def resolve_account(name_or_id: str) -> dict:
+    """Resolve an account name (or partial name) to its 12-digit id, so the user
+    never has to type the account number.
+
+    Looks the account up in AWS Organizations (id -> name) and matches on name,
+    case insensitive: an exact name match wins, otherwise any name that contains
+    the text. A 12-digit id passed straight through is validated and, when known,
+    named. Each match carries a masked id (last 4) for confirmation.
+
+    Returns:
+        query: the input.
+        matches: list of {account_id, name, masked}.
+        resolved: true when exactly one match (safe to proceed after confirming).
+        source: "organizations" or "none".
+        note: set when Organizations could not be read, telling the caller to ask
+            for the 12-digit id instead.
+    """
+    q = (name_or_id or "").strip()
+    names = _account_names()  # id -> name
+
+    # A full account id: pass through, name it if we can.
+    if re.fullmatch(r"\d{12}", q):
+        return {"query": q, "resolved": True,
+                "source": "organizations" if names else "none",
+                "matches": [{"account_id": q, "name": names.get(q), "masked": _mask(q)}]}
+
+    if not names:
+        return {"query": q, "resolved": False, "source": "none", "matches": [],
+                "note": ("could not read AWS Organizations from here, so names cannot be "
+                         "resolved; ask the user for the 12-digit account id")}
+
+    ql = q.lower()
+    exact = [(i, n) for i, n in names.items() if (n or "").lower() == ql]
+    partial = [(i, n) for i, n in names.items() if ql and ql in (n or "").lower()]
+    chosen = exact or partial
+    return {
+        "query": q,
+        "exact": bool(exact),
+        "source": "organizations",
+        "matches": [{"account_id": i, "name": n, "masked": _mask(i)} for i, n in chosen],
+        "resolved": len(chosen) == 1,
+    }
 
 
 def _vpc_detail(session, vpc_id: str, region: str) -> dict:

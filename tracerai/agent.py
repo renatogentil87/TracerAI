@@ -21,6 +21,7 @@ from tracerai.tools.security_groups import scan_port as _scan_port
 from tracerai.tools.cross_account import discover_network as _discover_network
 from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
 from tracerai.tools.cross_account import get_instance_security_groups as _get_instance_security_groups
+from tracerai.tools.cross_account import resolve_account as _resolve_account
 from tracerai.tools.cross_account import _account_names
 from tracerai.tools.reachability_trace import resolve_endpoint as _resolve_endpoint
 from tracerai.tools.reachability_trace import trace_cross_account as _trace_cross_account
@@ -71,6 +72,28 @@ def resolve_instance(name: str, region: str = None) -> dict:
         region: optional region to narrow the search.
     """
     return _resolve_instance(name, region)
+
+
+@tool
+def resolve_account(name_or_id: str) -> dict:
+    """Resolve an AWS account NAME to its 12-digit id so the user never types the number.
+
+    Call this whenever the user refers to an account by name (for example "SpokeDev1",
+    "the networking account", "shared services") instead of a 12-digit id. It looks the name
+    up in AWS Organizations and matches case insensitively: an exact name wins, otherwise any
+    account whose name contains the text. A 12-digit id is validated and named.
+
+    Do NOT ask the user for the 12-digit account id before trying this. After it resolves,
+    confirm with the user using the masked id (for example "That is your SpokeDev1 account
+    (...9670), correct?"), then pass the full account_id to the other tools.
+
+    Args:
+        name_or_id: an account name, a partial name, or a 12-digit account id.
+
+    Returns matches (each with account_id, name, masked), resolved (true when exactly one
+    match), and a note when Organizations cannot be read (only then ask for the 12-digit id).
+    """
+    return _resolve_account(name_or_id)
 
 
 @tool
@@ -420,6 +443,21 @@ networking account"), Reachability Analyzer cannot see the other account's route
 tables, so use the cross-account flow below instead. If you are unsure which
 applies, ask whether the two resources are in the same account.
 
+Account names, never ask for the 12-digit id:
+When the user names an account instead of giving a 12-digit id (for example
+"SpokeDev1", "the networking account", "shared services"), do NOT ask them for
+the number. Call resolve_account with the name first.
+- If it resolves to exactly one account, confirm with the masked id before you
+  use it, for example "That is your SpokeDev1 account (...9670), correct?", then
+  pass the full account_id to the other tools.
+- If several accounts match, list them by name and masked id and ask which one.
+- Only ask the user to type the 12-digit id when resolve_account returns a note
+  that Organizations could not be read. A 12-digit id the user gives can also be
+  passed through resolve_account to attach its name.
+Do the same for every account in the request: resolve and confirm the source
+account and the destination account before calling resolve_endpoint or
+trace_cross_account.
+
 Same account:
 1. If they named an instance by a friendly name (not an i-xxxx id), call
    resolve_instance to get its id, for both source and destination.
@@ -707,7 +745,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs, check_firewall_rules],
+        tools=[resolve_instance, resolve_account, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs, check_firewall_rules],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )
