@@ -1,6 +1,6 @@
 # TracerAI
 
-TracerAI is a networking troubleshooting agent for AWS. It is built with the Strands Agents SDK on Amazon Bedrock and uses read-only `boto3` tools to inspect live network infrastructure (EC2 Reachability Analyzer, security groups, instance lookup), then explains in plain language why connectivity works or fails.
+TracerAI is a networking troubleshooting agent for AWS. It is built with the Strands Agents SDK on Amazon Bedrock and uses read-only `boto3` tools to inspect live network infrastructure across accounts and regions (Transit Gateway, Cloud WAN, VPC routing, security groups, NACLs, NAT, Direct Connect, flow logs), then explains in plain language why connectivity works or fails.
 
 ## What it does
 
@@ -12,6 +12,11 @@ every attached VPC it reads the CIDRs, subnets, route tables, security groups an
 NACLs in that VPC's owner account. Other accounts are read by assuming a
 read-only role there (see [`deploy/`](deploy/README.md)); accounts without the
 role are reported with a note instead of failing.
+
+Beyond discovery it can **trace reachability across accounts and regions** (and
+it is 1:1 NAT aware), **check Direct Connect** health and resilience against the
+AWS SLA targets, and **read VPC flow logs** for evidence of accepted or rejected
+traffic. See [Tools](#tools) for the full set and when each is used.
 
 ## How it works
 
@@ -124,6 +129,9 @@ Each tool runs standalone, which is the quickest way to test credentials and out
 python tracerai/tools/reachability.py
 python tracerai/tools/instances.py
 python tracerai/tools/security_groups.py
+python tracerai/tools/cross_account.py
+python tracerai/tools/directconnect.py
+python tracerai/tools/flow_logs.py
 ```
 
 ## Tools
@@ -211,18 +219,22 @@ For **cross-account discovery**, two more things apply:
   management account or a delegated administrator. Without it, discovery still
   works and just shows the account id.
 - **In each target account**: the `TracerAI-ReadOnly` role from
-  [`deploy/cross-account-role.yaml`](deploy/cross-account-role.yaml) grants only
-  read-only EC2 describe and networkmanager read actions. Deploying the role
-  needs IAM-write permission (PowerUserAccess is not enough), which is why the
-  org-wide rollout uses a StackSet from the management account.
+  [`deploy/cross-account-role.yaml`](deploy/cross-account-role.yaml) grants
+  read-only actions only. It covers EC2 describe (VPCs, subnets, route tables,
+  security groups, NACLs, NAT gateways, flow logs, and Transit Gateway including
+  `SearchTransitGatewayRoutes` and `GetTransitGatewayAttachmentNatConfiguration`),
+  `networkmanager` read for Cloud WAN, `directconnect:Describe*`, and CloudWatch
+  Logs Insights (`logs:StartQuery` / `GetQueryResults`) for VPC flow logs.
+  Deploying the role needs IAM-write permission (PowerUserAccess is not enough),
+  which is why the org-wide rollout uses a StackSet from the management account.
 
 ## Troubleshooting
 
 - **"Model use case details have not been submitted" / ResourceNotFound on the model:**
   submit the Anthropic use case form in the Bedrock console, then wait a few minutes.
-- **Instance not found:** TracerAI only sees the account your credentials point at.
-  Check the "Operating against account ... region ..." line at startup. Name
-  matching is partial and case insensitive and a few regions are searched by default.
+- **Instance not found:** TracerAI only sees the account your credentials point at
+  (unless you give it another account to assume into). Check the "Operating in ...
+  in region ..." line at startup. Name matching is partial and case insensitive.
 - **AccessDenied with "explicit deny in a service control policy":** an org SCP is
   blocking the call (common for Bedrock). That is an org-level control, not the tool.
 
