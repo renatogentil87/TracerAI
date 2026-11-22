@@ -215,23 +215,54 @@ def _vpc_detail(session, vpc_id: str, region: str) -> dict:
     return detail
 
 
-def discover_network(region: str = None) -> dict:
-    """Map the whole network in a region, across accounts, via the TGW attachments.
+def _tgw_nat_config(ec2, attachment_id: str) -> dict:
+    """Read 1:1 NAT rules on a Transit Gateway VPC attachment.
 
-    Runs in the Transit Gateway owner account. Lists every attachment, then for
-    each VPC attachment reads that VPC's full detail (CIDRs, subnets, route
-    tables, security groups, NACLs) in its owner account, assuming the read-only
-    role when the owner is another account and using local creds for this
-    account's own VPCs (shared, endpoints, centralized). Non-VPC attachments
-    (VPN, peering, Direct Connect) are listed separately. An account with no role
-    is reported with a note, not failed.
+    The attachment NAT feature (launched 2026-10-23) translates MatchSourceCidr
+    to NatCidr in both directions. Returns the enabled state and the rules, or a
+    note if the call is not permitted or not supported by the endpoint.
+    """
+    try:
+        r = ec2.get_transit_gateway_attachment_nat_configuration(
+            TransitGatewayAttachmentId=attachment_id)
+        return {
+            "enabled": str(r.get("NatGatewaySupport", "")).lower() in ("enable", "enabled"),
+            "nat_gateway_support": r.get("NatGatewaySupport"),
+            "system_route_support": r.get("NatSystemRouteSupport"),
+            "rules": [{"rule_number": x.get("RuleNumber"),
+                       "match_source_cidr": x.get("MatchSourceCidr"),
+                       "nat_cidr": x.get("NatCidr"),
+                       "state": x.get("State")}
+                      for x in r.get("NatGatewayRules", [])],
+        }
+    except Exception as e:
+        return {"note": "could not read TGW NAT config "
+                        f"(needs ec2:GetTransitGatewayAttachmentNatConfiguration): {e}"}
+
+
+def discover_network(region: str = None) -> dict:
+    """Map the whole network in a region (or several), across accounts.
+
+    region may be a single region, or several comma separated (for example
+    "eu-west-1,us-east-1") to validate a cross-region design in one call. Runs in
+    the Transit Gateway owner account. Lists every attachment, then for each VPC
+    attachment reads that VPC's full detail (CIDRs, subnets, route tables,
+    security groups, NACLs, NAT gateways, flow logs) in its owner account,
+    assuming the read-only role when the owner is another account and using local
+    creds for this account's own VPCs. Each TGW VPC attachment also carries its
+    1:1 NAT config. Non-VPC attachments are listed separately. An account with no
+    role is reported with a note, not failed.
 
     Args:
-        region: the region to map.
+        region: one region, or several comma separated for a cross-region map.
 
-    Returns transit_gateways, vpc_attachments (each with account, vpc detail),
-    and other_attachments.
+    Returns, for one region: transit_gateways, vpc_attachments, other_attachments
+    and cloud_wan. For several regions: by_region keyed by each region.
     """
+    if region and "," in region:
+        regions = [r.strip() for r in region.split(",") if r.strip()]
+        return {"multi_region": True, "regions": regions,
+                "by_region": {r: discover_network(r) for r in regions}}
     if not region:
         return {"needs_region": True}
 
@@ -266,6 +297,7 @@ def discover_network(region: str = None) -> dict:
             "account_id": account_id,
             "account_name": acct_names.get(account_id),
             "vpc_id": vpc_id,
+            "nat": _tgw_nat_config(ec2, a["TransitGatewayAttachmentId"]),
         }
         try:
             session = get_session(account_id=(None if account_id == me else account_id), region=region)
@@ -410,6 +442,14 @@ def discover_cloud_wan(region: str = None, account_names: dict = None) -> dict:
                         AttachmentId=a.get("AttachmentId")).get("VpcAttachment", {})
                     vatt["options"] = va.get("Options")
                     vatt["subnet_arns"] = va.get("SubnetArns")
+                    att = va.get("Attachment", {})
+                    nat_support = att.get("NatGatewaySupport")
+                    if nat_support is not None:
+                        vatt["nat"] = {
+                            "enabled": str(nat_support).lower() in ("enable", "enabled"),
+                            "nat_gateway_support": nat_support,
+                            "system_route_support": att.get("NatSystemRouteSupport"),
+                        }
                 except Exception:
                     pass
                 try:

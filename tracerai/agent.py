@@ -166,13 +166,18 @@ def discover_network(region: str = None) -> dict:
     It assumes the read-only role for VPCs in other accounts and uses local
     creds for this account's own VPCs (shared, endpoints, centralized). Non-VPC
     attachments (VPN, peering, Direct Connect, TGW-to-Cloud-WAN) are listed
-    separately. If the user did not give a region, ask first.
+    separately. Each TGW and Cloud WAN VPC attachment also reports its 1:1 NAT
+    config (whether NAT is enabled and, for TGW, the rules mapping
+    match_source_cidr to nat_cidr). If the user did not give a region, ask first.
+
+    For a cross-region design, pass several regions comma separated, for example
+    "eu-west-1,us-east-1"; the result then has by_region keyed by each region.
 
     Args:
-        region: the AWS region to map, e.g. "eu-west-1".
+        region: one region (e.g. "eu-west-1"), or several comma separated.
 
-    Returns transit_gateways, vpc_attachments, other_attachments, and cloud_wan
-    (core_networks with segments and vpc_attachments). An account missing the
+    Returns, for one region: transit_gateways, vpc_attachments, other_attachments
+    and cloud_wan. For several: by_region keyed by region. An account missing the
     read-only role is listed with a note, not failed.
     """
     return _discover_network(region)
@@ -420,6 +425,40 @@ Use prose and compact lists, never wide tables, and never raw JSON. If the
 cloud_wan block has an error or is empty, say Cloud WAN was not found or not
 readable from this account; do not invent segments.
 
+Overlapping CIDRs and 1:1 NAT (validation):
+AWS Transit Gateway and Cloud WAN support 1:1 NAT on an attachment (launched Oct
+2026) so VPCs with overlapping CIDRs can talk without renumbering. Each rule maps
+a match_source_cidr to a nat_cidr and is bidirectional. discover_network reports
+each attachment's nat block (enabled, and for TGW the rules). When the user asks
+whether two VPCs with overlapping CIDRs can reach each other through 1:1 NAT,
+read the live config and check these, reporting exactly what is present and what
+is missing (do not assume a default):
+- NAT is enabled on the attachment of each VPC whose address must be translated.
+  For two mutually overlapping VPCs, BOTH ends need a rule, so each is reached by
+  a non-overlapping NAT CIDR. If one end has NAT and the other does not, say which
+  end is missing it.
+- A rule whose match_source_cidr covers the VPC's real CIDR, with a nat_cidr (the
+  non-overlapping outside range). For TGW the rules are in the nat block; for
+  Cloud WAN the SDK does not return the rule list, so confirm the nat_cidr from
+  the segment route tables instead and say so.
+- A route to each nat_cidr exists in the route table that carries the traffic:
+  the TGW route table, or the Cloud WAN segment route table (and any segment that
+  shares routes). Cloud WAN installs this for a VPC attachment when the rule
+  exactly matches a VPC CIDR; otherwise a static route for the nat_cidr is needed
+  in the core network policy. For TGW a non-exact match needs a static route to
+  the VPC attachment.
+- The caller reaches the peer by its nat_cidr (outside) address, not the real
+  overlapping address. Enabling NAT replaces the real-CIDR route with the
+  nat_cidr route, so anything still using the real address loses connectivity;
+  call this out.
+- No nat_cidr overlaps a range already routed in the segment or core network, or
+  longest-prefix match may misroute it.
+State the verdict plainly: either "this works" or "this will not work: X is
+missing, configure Y and Z", naming the exact attachment, rule, or route. Base it
+only on the config you read; cite AWS 1:1 NAT documentation for the requirement,
+and if the Cloud WAN rule detail is not readable, say which end you could not
+fully confirm.
+
 Cross-account lookups:
 - "what route table is in vpc-abc in account 123456789012" -> get_vpc_route_tables
   with that vpc_id and account_id.
@@ -437,10 +476,11 @@ Grounding before you recommend a fix:
 - Recognize centralized designs. If egress or NAT is centralized through a
   Transit Gateway, an inspection or egress VPC, or Cloud WAN, do NOT tell the
   user to add a NAT gateway in the spoke; the default route pointing at the TGW
-  or a core network is that centralized path. For overlapping CIDRs, look at the
-  VPC's nat_gateways (a private NAT gateway, with its subnet_cidr as the
-  non-overlapping outside range) and the route tables, not at the Cloud WAN
-  attachment, which does not carry NAT settings.
+  or a core network is that centralized path. For overlapping CIDRs, the 1:1 NAT
+  may be on the TGW or Cloud WAN attachment itself (each attachment's nat block,
+  and the 1:1 NAT validation section above) and/or a private NAT gateway in the
+  VPC (nat_gateways, whose subnet_cidr is the non-overlapping outside range).
+  Check both, plus the route tables.
 - State only what a tool actually returned. If a piece of config is not in the
   data (for example a note that NAT gateways or flow logs could not be read),
   say you could not see it with the current access and what is needed, rather
