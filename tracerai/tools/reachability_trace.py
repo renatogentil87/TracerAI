@@ -30,7 +30,10 @@ import ipaddress
 import boto3
 
 from tracerai.aws_session import get_session
-from tracerai.tools.cross_account import _flatten_sg_rule, _assume_failure_note, _tgw_nat_config
+from tracerai.tools.cross_account import (
+    _flatten_sg_rule, _assume_failure_note, _tgw_nat_config,
+    _nm_paginate, _parse_vpc_arn, validate_cloud_wan_path,
+)
 
 
 def _norm(account_id, me):
@@ -320,10 +323,31 @@ def _endpoint_nat(session, region, vpc_id, route_table, me, account_id, tgw_acco
                 return {"backbone": "transit gateway", "enabled": True}
     except Exception:
         pass
-    # Cloud WAN fallback: the VPC routes to a core network.
-    for r in _vpc_routes(route_table):
-        if r["target"][0] == "core_network":
-            return {"backbone": "Cloud WAN", "unreadable": True}
+    # Cloud WAN fallback: the VPC routes to a core network. Only report NAT when the
+    # VPC's Cloud WAN attachment actually has NAT enabled; do NOT assume NAT just because
+    # the path uses Cloud WAN (that false "unreadable NAT" was sending diagnoses chasing a
+    # NAT that is not configured).
+    uses_core_network = any(r["target"][0] == "core_network" for r in _vpc_routes(route_table))
+    if not uses_core_network:
+        return None
+    try:
+        nm = boto3.client("networkmanager", region_name="us-east-1")
+        atts = _nm_paginate(nm.list_attachments, "Attachments")
+        for a in atts:
+            if a.get("AttachmentType") != "VPC":
+                continue
+            _vr, _acct, avpc = _parse_vpc_arn(a.get("ResourceArn", ""))
+            if avpc != vpc_id:
+                continue
+            va = nm.get_vpc_attachment(AttachmentId=a.get("AttachmentId")).get("VpcAttachment", {})
+            nat_support = (va.get("Attachment", {}) or {}).get("NatGatewaySupport")
+            if nat_support is not None and str(nat_support).lower() in ("enable", "enabled"):
+                # NAT is on, but networkmanager does not expose the rule CIDRs.
+                return {"backbone": "Cloud WAN", "enabled": True, "unreadable": True}
+            return None  # Cloud WAN attachment found, NAT not enabled: no NAT on this path.
+    except Exception:
+        # Could not read the attachment's NAT setting; do not invent NAT. Stay silent.
+        return None
     return None
 
 
@@ -474,13 +498,45 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
             if m.get("resource_type") == "vpc" and dst_vpc and m.get("resource_id") != dst_vpc:
                 inspection = m.get("resource_id")
 
-    # Cross-region / cross-backbone leg that this walk cannot follow end to end.
-    if cross_region:
+    # Cloud WAN segment validation. When the path hands off to a Cloud WAN core network
+    # (the source VPC is attached to it, or the TGW route points at the TGW-to-core-network
+    # peering, or the destination VPC rides Cloud WAN), read the segment route tables at
+    # EVERY edge the segment spans and resolve both the forward and return address. This is
+    # the layer the single-region TGW read cannot see, and it scales: adding Cloud WAN
+    # regions needs no change here, because validate_cloud_wan_path iterates the segment's
+    # own edge list.
+    src_kind = match["target"][0] if match else None
+    tgw_to_cw = bool(via_tgw and tgw.get("match")
+                     and tgw["match"].get("resource_type") not in ("vpc", None))
+    dst_on_cw = bool(dst_ctx and any(r["target"][0] == "core_network"
+                                     for r in _vpc_routes(dst_ctx.get("route_table"))))
+    uses_cloud_wan = (src_kind == "core_network") or tgw_to_cw or dst_on_cw
+
+    if uses_cloud_wan:
+        try:
+            cw = validate_cloud_wan_path(dst_ip=effective_dst, return_ip=effective_src,
+                                         region=dreg)
+        except Exception as e:
+            cw = {"error": f"could not validate Cloud WAN path: {e}"}
+        if cw.get("error"):
+            add("cloud wan segment routing", "unknown", cw["error"])
+        elif cw.get("consistent"):
+            add("cloud wan segment routing", "pass",
+                f"forward {effective_dst} and return {effective_src} resolve consistently in "
+                f"segment(s) {', '.join(cw.get('segments_checked', []))} across all edges "
+                f"(core network {cw.get('core_network_id')})")
+        else:
+            problems = cw.get("problems", [])
+            detail = "; ".join(p.get("reason", "") for p in problems if p.get("reason"))
+            add("cloud wan segment routing", "fail",
+                f"Cloud WAN segment routing is inconsistent: {detail}" if detail
+                else "Cloud WAN segment routing is inconsistent (see segment_results)")
+    elif cross_region:
         add("inter-region leg", "unknown",
-            f"source is in {sreg} and destination in {dreg}. This walk checks each side in its "
-            "own region but does not follow the inter-region Transit Gateway peering or Cloud WAN "
-            "core-network hop between them; confirm the segment or peering routes carry "
-            f"{effective_dst} from {sreg} to {dreg} and {effective_src} back")
+            f"source is in {sreg} and destination in {dreg}. No Cloud WAN handoff was detected on "
+            "the path read so far, and this walk does not follow an inter-region Transit Gateway "
+            f"peering by itself; confirm the peering routes carry {effective_dst} from {sreg} to "
+            f"{dreg} and {effective_src} back.")
 
     # 6. Destination SG + NACL ingress (from the source address the destination sees).
     if dst_ctx:

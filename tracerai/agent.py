@@ -21,6 +21,7 @@ from tracerai.tools.security_groups import scan_port as _scan_port
 from tracerai.tools.cross_account import discover_network as _discover_network
 from tracerai.tools.cross_account import get_vpc_route_tables as _get_vpc_route_tables
 from tracerai.tools.cross_account import get_instance_security_groups as _get_instance_security_groups
+from tracerai.tools.cross_account import validate_cloud_wan_path as _validate_cloud_wan_path
 from tracerai.tools.cross_account import resolve_account as _resolve_account
 from tracerai.tools.cross_account import _account_names
 from tracerai.tools.reachability_trace import resolve_endpoint as _resolve_endpoint
@@ -249,6 +250,43 @@ def get_instance_security_groups(instance_id: str, account_id: str = None, regio
     note if the account's role could not be assumed.
     """
     return _get_instance_security_groups(instance_id, account_id=account_id, region=region)
+
+
+@tool
+def validate_cloud_wan_path(dst_ip: str, return_ip: str = None, segment_name: str = None,
+                            core_network_id: str = None, region: str = None) -> dict:
+    """Validate how a Cloud WAN segment routes an address, at EVERY edge the segment spans.
+
+    Use this whenever traffic crosses a Cloud WAN core network and you need to know the
+    segment actually carries it to the right next hop, both ways. This is the check a
+    per-region route read misses: it resolves the destination prefix (and, when given, the
+    return/source prefix) inside the segment at each edge location the segment spans, so a
+    cross-region Cloud WAN (eu-west-1 plus ca-central-1 plus any you add later) is validated
+    in one call with no per-region work. It flags the common faults: a spoke prefix that
+    resolves to the inspection or egress attachment instead of its VPC or the TGW peering (a
+    prod-to-prod-via-inspection leak), a blackhole, a missing route, and forward/return
+    asymmetry. Pass return_ip to validate the return path at the same time, which is usually
+    what you want for "why does the ping fail" questions.
+
+    Call this after trace_cross_account reports a "cloud wan segment routing" finding you want
+    to expand, or directly when the user points at a Cloud WAN segment. If there is more than
+    one core network, pass core_network_id (the error lists them).
+
+    Args:
+        dst_ip: the destination address (forward path) to resolve in the segment.
+        return_ip: the source address (return path) to resolve too; strongly recommended.
+        segment_name: the segment to inspect (e.g. "prod"); omit to check every segment and
+            report only the ones that actually carry one of the addresses.
+        core_network_id: the core network id; omit when there is only one.
+        region: any region the core network touches, used to find the global network; the
+            validation itself spans all edges, not just this region.
+
+    Returns per-segment, per-edge results with the matched route, the next-hop classification
+    (vpc | peering | inspection | blackhole | none), consistent true/false with a reason, and
+    a top-level problems list naming each inconsistent segment/edge.
+    """
+    return _validate_cloud_wan_path(dst_ip=dst_ip, return_ip=return_ip, segment_name=segment_name,
+                                    core_network_id=core_network_id, region=region)
 
 
 @tool
@@ -692,6 +730,53 @@ Grounding before you recommend a fix:
   say you could not see it with the current access and what is needed, rather
   than inventing which API holds it or assuming a default.
 
+Cloud WAN segment routing:
+- When traffic crosses a Cloud WAN core network (a VPC attached to it, or a TGW
+  route that points at the TGW-to-core-network peering, or a cross-region path
+  over Cloud WAN), you MUST validate the segment route tables before you say the
+  routing is fine. trace_cross_account now does this automatically and adds a
+  "cloud wan segment routing" finding; read it. To dig in or when the user points
+  at a segment, call validate_cloud_wan_path with dst_ip and return_ip (the source
+  address) so forward and return are checked together.
+- validate_cloud_wan_path reads the segment at EVERY edge it spans, so a
+  cross-region Cloud WAN is covered in one call and new regions are included
+  automatically. Do not read a single region's segment and conclude; the fault is
+  often at the other edge (for example a prefix learned at ca-central-1 but not at
+  eu-west-1, or the reverse).
+- The classic fault it catches: a spoke prefix (for example 172.20.0.0/16) that
+  resolves in the segment to the inspection or egress attachment instead of the
+  destination VPC or the TGW peering. That is prod-to-prod traffic leaking into
+  inspection, and it is usually a return-path asymmetry: the forward prefix is
+  fine, the return prefix points at inspection. Report the exact segment, edge,
+  and attachment id from the problems list, and the fix (stop the inspection
+  attachment from propagating that spoke prefix into the segment; let it be
+  reached via the TGW peering).
+
+Do not conclude from data you did not read:
+- NEVER state that routing, a route table, or a Cloud WAN segment is correct, and
+  NEVER give a final verdict, for any layer you did not actually read in this
+  session. If the destination is in another region, you have not seen its route
+  tables until you discover that region or validate_cloud_wan_path covers it. Say
+  "I have not read the ca-central-1 segment yet" and go read it, rather than
+  asserting it is correct.
+- An in-path layer you did not read is an UNKNOWN, not a pass. Only call the
+  routing clean once every layer on the path (source VPC, TGW route table, every
+  Cloud WAN segment edge the path crosses, destination VPC, both SGs and NACLs)
+  has actually been returned by a tool.
+- Do NOT jump to a guest-OS cause (iptables, firewalld, the instance's own
+  firewall) until every AWS layer on the path has been read and cleared. The OS
+  firewall is a last resort after SG, NACL, route tables, Cloud WAN segments and
+  any inspection firewall are all confirmed to pass with real data; offer it as
+  "the AWS path is clean end to end, so check the OS firewall next", never as a
+  guess to fill a gap you did not inspect.
+
+Asking for missing input:
+- When you are missing an identifier a tool needs (an account id, a region, a
+  port), ask for it ONCE, as a single compact list of what you need, then stop and
+  wait. Do not re-ask the same questions in several paragraphs, and do not narrate
+  that you are about to try. resolve_endpoint genuinely needs the 12-digit account
+  id to assume the cross-account role, so it is fine to require it; just ask once.
+
 Style:
 - Keep replies short. State the finding and the next step in a sentence or two.
 - When an instance is not found, do NOT tell the user to check the console or to
@@ -745,7 +830,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, resolve_account, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs, check_firewall_rules],
+        tools=[resolve_instance, resolve_account, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, validate_cloud_wan_path, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs, check_firewall_rules],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )

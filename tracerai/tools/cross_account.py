@@ -7,6 +7,7 @@ target account and trust the account TracerAI runs in.
     python tracerai/tools/cross_account.py
 """
 
+import ipaddress
 import os
 import re
 
@@ -526,6 +527,228 @@ def discover_cloud_wan(region: str = None, account_names: dict = None) -> dict:
         result.append(entry)
 
     return {"core_networks": result}
+
+
+def _cidr_contains(cidr: str, ip: str) -> bool:
+    """True when ip (an address) falls inside cidr. IPv4/IPv6 safe, never raises."""
+    if not cidr or not ip:
+        return False
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+
+
+def _prefix_len(cidr: str) -> int:
+    try:
+        return ipaddress.ip_network(cidr, strict=False).prefixlen
+    except ValueError:
+        return -1
+
+
+def _read_segment_edge_routes(nm, global_network_id, core_network_id, segment_name, edge):
+    """Read one segment's route table (RIB) at one edge. Returns a list of routes
+    or a dict with an error note. Factored out so it can be called for every edge
+    of a segment without duplicating the shape."""
+    try:
+        resp = nm.get_network_routes(
+            GlobalNetworkId=global_network_id,
+            RouteTableIdentifier={
+                "CoreNetworkSegmentEdge": {
+                    "CoreNetworkId": core_network_id,
+                    "SegmentName": segment_name,
+                    "EdgeLocation": edge,
+                }
+            })
+    except Exception as e:
+        return {"error": f"could not read {segment_name} routes at {edge}: {e}"}
+    out = []
+    for r in resp.get("NetworkRoutes", []):
+        out.append({
+            "destination": r.get("DestinationCidrBlock"),
+            "state": r.get("State"),
+            "type": r.get("Type"),
+            "targets": [
+                {"segment": d.get("SegmentName"), "edge_location": d.get("EdgeLocation"),
+                 "resource_type": d.get("ResourceType"), "resource_id": d.get("ResourceId"),
+                 "attachment_id": d.get("CoreNetworkAttachmentId")}
+                for d in r.get("Destinations", [])
+            ],
+        })
+    return out
+
+
+def validate_cloud_wan_path(dst_ip: str, segment_name: str = None, core_network_id: str = None,
+                            return_ip: str = None, region: str = None) -> dict:
+    """Validate how a Cloud WAN segment routes an address, at EVERY edge of the segment.
+
+    This is the check trace_cross_account cannot do by reading one region's RIB: it
+    resolves the destination prefix inside the named segment at each edge the segment
+    spans, so adding Cloud WAN regions needs no code change. For every edge it reports
+    the longest-prefix match for dst_ip (and, when given, return_ip) and the next-hop
+    attachment, and FLAGS when a prefix resolves to an inspection or egress attachment
+    rather than the VPC/peering attachment that should own it. That misrouting (a spoke
+    prefix pointing at the inspection attachment) is the asymmetry class that single-edge
+    reads miss.
+
+    Args:
+        dst_ip: the destination address to resolve in the segment (the forward path).
+        segment_name: the Cloud WAN segment to inspect (e.g. "prod"). When omitted,
+            every segment is checked and the matches reported per segment.
+        core_network_id: the core network id. When omitted, the single core network is
+            used; if there is more than one, the list is returned so the caller can pass one.
+        return_ip: optional source address to resolve for the return path, so forward and
+            return are validated together (the common asymmetry case).
+        region: a region the core network touches, used only to find the global network /
+            owner account. The validation itself spans all edges, not just this region.
+
+    Returns core_network_id and, per segment, a list of edge results. Each edge result has
+    the matched route for dst_ip (and return_ip), the next-hop attachment, a classification
+    (vpc | peering | inspection | egress | blackhole | none), and consistent=False with a
+    reason when the match looks wrong (spoke prefix via inspection, blackhole, or no route).
+    """
+    nm = boto3.client("networkmanager", region_name="us-east-1")
+
+    try:
+        core_networks = _nm_paginate(nm.list_core_networks, "CoreNetworks")
+    except Exception as e:
+        return {"error": f"could not list core networks: {e}"}
+    if not core_networks:
+        return {"error": "no Cloud WAN core networks found in this account"}
+
+    if core_network_id:
+        cn = next((c for c in core_networks if c.get("CoreNetworkId") == core_network_id), None)
+        if not cn:
+            return {"error": f"core network {core_network_id} not found"}
+    elif len(core_networks) == 1:
+        cn = core_networks[0]
+    else:
+        return {"error": "more than one core network; pass core_network_id",
+                "core_networks": [c.get("CoreNetworkId") for c in core_networks]}
+
+    core_network_id = cn.get("CoreNetworkId")
+    global_network_id = cn.get("GlobalNetworkId")
+
+    # Segments and the edges each spans, from the core network detail.
+    try:
+        detail = nm.get_core_network(CoreNetworkId=core_network_id)["CoreNetwork"]
+    except Exception as e:
+        return {"error": f"could not read core network detail: {e}", "core_network_id": core_network_id}
+    segments = {s.get("Name"): (s.get("EdgeLocations") or []) for s in detail.get("Segments", [])}
+    if segment_name:
+        if segment_name not in segments:
+            return {"error": f"segment {segment_name} not found",
+                    "segments": sorted(segments)}
+        targets = {segment_name: segments[segment_name]}
+    else:
+        targets = segments
+
+    # Which attachments are inspection/egress, so a spoke prefix pointing at one is a leak.
+    # An attachment feeding the segment's default route (0.0.0.0/0) is the egress/inspection
+    # hop; we learn its id per edge from the default route itself, no hardcoding.
+    def classify(route, edge_default_attachment):
+        if not route:
+            return "none"
+        if route.get("state") == "blackhole":
+            return "blackhole"
+        tgt = (route.get("targets") or [{}])[0]
+        att = tgt.get("attachment_id")
+        rtype = (tgt.get("resource_type") or "").lower()
+        if att and edge_default_attachment and att == edge_default_attachment:
+            return "inspection"  # same attachment as the segment default route
+        if "peering" in rtype or (tgt.get("resource_type") == "TRANSIT_GATEWAY_PEERING"):
+            return "peering"
+        if rtype in ("vpc",):
+            return "vpc"
+        return rtype or "other"
+
+    def best_match(routes, ip):
+        best, blen = None, -1
+        for r in routes:
+            d = r.get("destination")
+            if _cidr_contains(d, ip):
+                pl = _prefix_len(d)
+                if pl > blen:
+                    best, blen = r, pl
+        return best
+
+    seg_results = {}
+    for seg, edges in targets.items():
+        edge_results = []
+        for edge in edges:
+            routes = _read_segment_edge_routes(nm, global_network_id, core_network_id, seg, edge)
+            if isinstance(routes, dict) and routes.get("error"):
+                edge_results.append({"edge": edge, "error": routes["error"]})
+                continue
+            default_route = next((r for r in routes
+                                  if (r.get("destination") or "") in ("0.0.0.0/0", "::/0")), None)
+            default_att = None
+            if default_route and default_route.get("targets"):
+                default_att = default_route["targets"][0].get("attachment_id")
+
+            fwd = best_match(routes, dst_ip)
+            ret = best_match(routes, return_ip) if return_ip else None
+
+            # Relevance: a segment/edge that carries neither address is simply not this
+            # flow's segment (expected for unrelated segments in an all-segments sweep).
+            # Do not judge it, so the sweep does not flood with false "no route" problems.
+            if fwd is None and ret is None:
+                edge_results.append({"edge": edge, "relevant": False})
+                continue
+
+            fwd_class = classify(fwd, default_att)
+            res = {"edge": edge, "relevant": True,
+                   "forward": {"dst_ip": dst_ip, "match": fwd, "classification": fwd_class}}
+            consistent, reason = True, None
+            if fwd is None:
+                # Return matched here but forward did not: reverse-only presence is itself
+                # an asymmetry worth surfacing on a relevant segment.
+                consistent, reason = False, (
+                    f"segment {seg} at {edge} has a route for the return address {return_ip} but "
+                    f"none for the forward address {dst_ip} (asymmetric)")
+            elif fwd_class == "blackhole":
+                consistent, reason = False, f"{dst_ip} is blackholed in segment {seg} at {edge}"
+            elif fwd_class == "inspection":
+                consistent, reason = False, (
+                    f"{dst_ip} in segment {seg} at {edge} resolves to the inspection/egress "
+                    f"attachment ({(fwd.get('targets') or [{}])[0].get('attachment_id')}); a spoke "
+                    "prefix should reach its VPC or the TGW peering, not inspection. This is the "
+                    "prod-to-prod-via-inspection leak class.")
+
+            if return_ip:
+                ret_class = classify(ret, default_att)
+                res["return"] = {"return_ip": return_ip, "match": ret, "classification": ret_class}
+                if ret is None:
+                    consistent, reason = False, (reason or
+                        f"segment {seg} at {edge} routes the forward address {dst_ip} but has no "
+                        f"return route for {return_ip} (asymmetric: traffic goes but cannot return)")
+                elif ret_class == "blackhole":
+                    consistent, reason = False, (reason or
+                        f"{return_ip} is blackholed in segment {seg} at {edge}")
+                elif ret_class == "inspection":
+                    consistent, reason = False, (reason or
+                        f"return address {return_ip} in segment {seg} at {edge} resolves to the "
+                        "inspection/egress attachment; the return path is leaking into inspection.")
+
+            res["consistent"] = consistent
+            if reason:
+                res["reason"] = reason
+            edge_results.append(res)
+        seg_results[seg] = edge_results
+
+    all_edges = [e for edges in seg_results.values() for e in edges if "consistent" in e]
+    inconsistent = [e for e in all_edges if not e["consistent"]]
+    return {
+        "core_network_id": core_network_id,
+        "global_network_id": global_network_id,
+        "dst_ip": dst_ip, "return_ip": return_ip,
+        "segments_checked": sorted(targets),
+        "segment_results": seg_results,
+        "consistent": not inconsistent,
+        "problems": [{"segment": s, **e}
+                     for s, edges in seg_results.items() for e in edges
+                     if "consistent" in e and not e["consistent"]],
+    }
 
 
 def get_vpc_route_tables(vpc_id: str, account_id: str = None, region: str = None) -> dict:
