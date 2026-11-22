@@ -248,21 +248,24 @@ def resolve_endpoint(identifier: str, account_id: str = None, region: str = None
 @tool
 def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str = "tcp",
                         region: str = None, src_account_id: str = None,
-                        dst_account_id: str = None, tgw_account_id: str = None) -> dict:
+                        dst_account_id: str = None, tgw_account_id: str = None,
+                        src_region: str = None, dst_region: str = None) -> dict:
     """Trace connectivity between two instances in DIFFERENT accounts (read only, config based).
 
     Use this instead of check_reachability whenever the source and destination are in different AWS
     accounts: EC2 Reachability Analyzer cannot see another account's route tables, so it cannot
     answer cross-account questions. First resolve and confirm BOTH endpoints with resolve_endpoint,
     and ask the user for the port and protocol if they did not give them. Pass raw instance ids and
-    the account each one is in.
+    the account each one is in. For a cross-region path, set src_region and dst_region.
 
     It walks the path and reports the first layer that blocks it: source security group egress and
     subnet NACL egress, the source VPC route table, the Transit Gateway route table in the hub
-    account (does it have a route to the destination), destination security group and NACL ingress,
-    and the return path (including the TGW return route, a common asymmetric-routing failure). If the
-    path is routed through an inspection VPC it says so and asks the user to check the firewall
-    policy, since it does not read firewall rules; everything else around it is still checked.
+    account, destination security group and NACL ingress, and the return path. It is 1:1 NAT aware:
+    if an endpoint's attachment translates its address, the walk uses the translated (outside)
+    address, since the source must target the destination's NAT address and the destination sees the
+    source's NAT address. For TGW it reads the exact rule; for Cloud WAN the rule CIDRs are not in
+    the API, so it reports that and points to the segment route tables. It does not follow the
+    inter-region peering or TGW-to-Cloud-WAN hop itself, and flags that as a leg to confirm.
 
     Args:
         src_instance_id: the source instance id (resolve it first).
@@ -270,17 +273,20 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         port: the destination TCP/UDP port, e.g. 443. For ICMP it is ignored (pass -1).
         protocol: "tcp" (default), "udp", or "icmp". For ICMP it confirms a rule allows ICMP from
             the source, including an all-traffic (protocol -1) security group rule.
-        region: the region both ends are in.
+        region: the region both ends are in (single-region shortcut).
+        src_region: the source region (for a cross-region trace; defaults to region).
+        dst_region: the destination region (for a cross-region trace; defaults to region).
         src_account_id: the account that owns the source.
         dst_account_id: the account that owns the destination.
         tgw_account_id: the Transit Gateway owner (hub) account; when omitted it is resolved from the TGW's OwnerId.
 
-    Returns findings (each step with pass/fail/unknown/info and detail) and a verdict naming the
-    blocker, or saying the path looks open. Layers it cannot read are reported as unknown, not failed.
+    Returns findings (each step with pass/fail/unknown/info and detail), effective_src/effective_dst
+    (the NAT-translated addresses used), and a verdict. Layers it cannot read are unknown, not failed.
     """
     return _trace_cross_account(
         src_instance_id=src_instance_id, dst=dst, port=port, protocol=protocol, region=region,
-        src_account_id=src_account_id, dst_account_id=dst_account_id, tgw_account_id=tgw_account_id)
+        src_account_id=src_account_id, dst_account_id=dst_account_id, tgw_account_id=tgw_account_id,
+        src_region=src_region, dst_region=dst_region)
 
 
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.

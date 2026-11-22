@@ -30,7 +30,7 @@ import ipaddress
 import boto3
 
 from tracerai.aws_session import get_session
-from tracerai.tools.cross_account import _flatten_sg_rule, _assume_failure_note
+from tracerai.tools.cross_account import _flatten_sg_rule, _assume_failure_note, _tgw_nat_config
 
 
 def _norm(account_id, me):
@@ -277,16 +277,69 @@ def _tgw_owner(session, region, tgw_id):
         return None
 
 
+def _nat_translate(ip, match_cidr, nat_cidr):
+    """Map ip (inside match_cidr) to the same host offset inside nat_cidr.
+
+    1:1 NAT preserves the host address, so 10.100.0.5 in 10.100.0.0/24 with a NAT
+    CIDR of 172.30.0.0/24 becomes 172.30.0.5.
+    """
+    try:
+        m = ipaddress.ip_network(match_cidr, strict=False)
+        n = ipaddress.ip_network(nat_cidr, strict=False)
+        a = ipaddress.IPv4Address(ip)
+        if a not in m:
+            return None
+        return str(ipaddress.IPv4Address(int(n.network_address) + (int(a) - int(m.network_address))))
+    except Exception:
+        return None
+
+
+def _endpoint_nat(session, region, vpc_id, route_table, me, account_id, tgw_account_id):
+    """Best-effort 1:1 NAT for a VPC's attachment.
+
+    For a Transit Gateway attachment the rule is read directly. For a Cloud WAN
+    attachment the rule CIDRs are not exposed by the API, so this flags it as
+    unreadable and the NAT CIDR must be confirmed from the segment route tables.
+    Returns a dict or None when the VPC's attachment has no NAT.
+    """
+    try:
+        ec2 = session.client("ec2", region_name=region)
+        atts = ec2.describe_transit_gateway_attachments(Filters=[
+            {"Name": "resource-id", "Values": [vpc_id]},
+            {"Name": "resource-type", "Values": ["vpc"]}]).get("TransitGatewayAttachments", [])
+        if atts:
+            tgw_id = atts[0].get("TransitGatewayId")
+            owner = tgw_account_id or _tgw_owner(session, region, tgw_id) or account_id
+            osess = get_session(account_id=_norm(owner, me), region=region)
+            cfg = _tgw_nat_config(osess.client("ec2", region_name=region),
+                                  atts[0]["TransitGatewayAttachmentId"])
+            if cfg.get("rules"):
+                return {"backbone": "transit gateway", "enabled": cfg.get("enabled"),
+                        "rule": cfg["rules"][0]}
+            if cfg.get("enabled"):
+                return {"backbone": "transit gateway", "enabled": True}
+    except Exception:
+        pass
+    # Cloud WAN fallback: the VPC routes to a core network.
+    for r in _vpc_routes(route_table):
+        if r["target"][0] == "core_network":
+            return {"backbone": "Cloud WAN", "unreadable": True}
+    return None
+
+
 def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str = "tcp",
                         region: str = None, src_account_id: str = None,
-                        dst_account_id: str = None, tgw_account_id: str = None) -> dict:
-    """Trace reachability from a source instance to a destination across accounts.
+                        dst_account_id: str = None, tgw_account_id: str = None,
+                        src_region: str = None, dst_region: str = None) -> dict:
+    """Trace reachability from a source to a destination across accounts and regions.
 
-    dst may be a destination instance id (preferred, so the destination side can
-    be checked) or a private IP (routing is still checked). tgw_account_id is the
-    account that owns the Transit Gateway; when omitted it is resolved from the
-    TGW's own OwnerId, so it works whether the hub is the source, the
-    destination, or a separate networking account.
+    dst may be a destination instance id (preferred) or a private IP. For a
+    cross-region path set src_region and dst_region; otherwise region applies to
+    both. The walk is 1:1 NAT aware: if an endpoint's attachment translates its
+    address, the walk uses the translated (outside) address, because the source
+    must target the destination's NAT address and the destination sees the
+    source's NAT address. tgw_account_id (the hub) is resolved from the TGW's
+    OwnerId when omitted.
     """
     findings = []
 
@@ -294,81 +347,114 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         findings.append({"step": step, "result": result, "detail": detail})
 
     me = boto3.client("sts").get_caller_identity()["Account"]
+    sreg = src_region or region
+    dreg = dst_region or region or sreg
+    if not sreg:
+        return {"error": "no region given (set region, or src_region and dst_region)",
+                "findings": findings}
+    cross_region = sreg != dreg
 
-    # Sessions.
     try:
-        src_session = get_session(account_id=_norm(src_account_id, me), region=region)
+        src_session = get_session(account_id=_norm(src_account_id, me), region=sreg)
     except Exception as e:
         return {"error": _assume_failure_note(src_account_id, e), "findings": findings}
     dst_session = None
     if dst_account_id:
         try:
-            dst_session = get_session(account_id=_norm(dst_account_id, me), region=region)
+            dst_session = get_session(account_id=_norm(dst_account_id, me), region=dreg)
         except Exception as e:
             add("destination account", "unknown", _assume_failure_note(dst_account_id, e))
 
-    # Gather endpoints.
-    src = _gather(src_session, region, src_instance_id)
+    src = _gather(src_session, sreg, src_instance_id)
     src_ip = src["private_ip"]
     dst_ctx, dst_ip = None, None
     if dst.startswith("i-") and dst_session is not None:
-        dst_ctx = _gather(dst_session, region, dst)
+        dst_ctx = _gather(dst_session, dreg, dst)
         dst_ip = dst_ctx["private_ip"]
     elif _is_ipv4(dst):
         dst_ip = dst
-    elif dst.startswith("i-"):
-        dst_ip = None  # instance given but no dst session to read it
     if not dst_ip:
         add("destination", "unknown",
             "could not determine the destination IP (give a destination instance id with its "
             "account, or a private IP)")
         return {"src_ip": src_ip, "dst": dst, "port": port, "protocol": protocol, "findings": findings}
 
-    # 1. Source SG egress.
-    ok, why = _sg_allows(src["sg_outbound"], dst_ip, port, protocol)
+    # 1:1 NAT translation. effective_dst is what the source must target; effective_src
+    # is what the destination sees as the source.
+    effective_src, effective_dst = src_ip, dst_ip
+    src_nat = _endpoint_nat(src_session, sreg, src["vpc_id"], src.get("route_table"),
+                            me, src_account_id, tgw_account_id)
+    if src_nat and src_nat.get("rule"):
+        t = _nat_translate(src_ip, src_nat["rule"]["match_source_cidr"], src_nat["rule"]["nat_cidr"])
+        if t:
+            effective_src = t
+            add("source NAT", "info",
+                f"source {src_ip} is translated to {t} by the {src_nat['backbone']} NAT rule "
+                f"{src_nat['rule'].get('rule_number')} ({src_nat['rule']['match_source_cidr']} -> "
+                f"{src_nat['rule']['nat_cidr']}); the destination sees {t}")
+    elif src_nat and src_nat.get("unreadable"):
+        add("source NAT", "unknown",
+            f"the source is on {src_nat['backbone']} and may translate its address, but the API "
+            "does not expose the rule CIDRs; confirm the NAT CIDR from the segment route tables")
+    if dst_ctx:
+        dst_nat = _endpoint_nat(dst_session or src_session, dreg, dst_ctx["vpc_id"],
+                                dst_ctx.get("route_table"), me, dst_account_id, tgw_account_id)
+        if dst_nat and dst_nat.get("rule"):
+            t = _nat_translate(dst_ip, dst_nat["rule"]["match_source_cidr"], dst_nat["rule"]["nat_cidr"])
+            if t:
+                effective_dst = t
+                add("destination NAT", "info",
+                    f"destination {dst_ip} is reached at its NAT address {t} "
+                    f"({dst_nat['backbone']} rule {dst_nat['rule'].get('rule_number')}: "
+                    f"{dst_nat['rule']['match_source_cidr']} -> {dst_nat['rule']['nat_cidr']}); "
+                    f"the source must target {t}, not {dst_ip}")
+        elif dst_nat and dst_nat.get("unreadable"):
+            add("destination NAT", "unknown",
+                f"the destination is on {dst_nat['backbone']} with NAT; the source must target the "
+                "destination's NAT CIDR, which the API does not expose. Find it in the segment "
+                "route tables and confirm the source routes to it")
+
+    # 1. Source SG egress (to the address the source actually targets).
+    ok, why = _sg_allows(src["sg_outbound"], effective_dst, port, protocol)
     if ok is True:
         add("source security group egress", "pass",
-            f"egress allows {proto_port(protocol, port)} to {dst_ip} via {why}")
+            f"egress allows {proto_port(protocol, port)} to {effective_dst} via {why}")
     elif ok is None:
         add("source security group egress", "unknown",
-            f"egress only references {why}; could not confirm {dst_ip} by CIDR")
+            f"egress only references {why}; could not confirm {effective_dst} by CIDR")
     else:
         add("source security group egress", "fail",
-            f"no egress rule allows {proto_port(protocol, port)} to {dst_ip}")
+            f"no egress rule allows {proto_port(protocol, port)} to {effective_dst}")
 
     # 2. Source NACL egress.
-    ok, rule = _nacl_allows(src.get("nacl"), True, dst_ip, port, protocol)
+    ok, rule = _nacl_allows(src.get("nacl"), True, effective_dst, port, protocol)
     add("source NACL egress", "pass" if ok else "fail",
         f"{'allowed' if ok else 'denied'} by NACL {src.get('nacl', {}).get('NetworkAclId')}"
         + (f" rule {rule}" if rule else ""))
 
-    # 3. Source VPC route table.
+    # 3. Source VPC route table (to the effective destination).
     routes = _vpc_routes(src.get("route_table"))
-    match = _match_route(routes, dst_ip)
+    match = _match_route(routes, effective_dst)
     via_tgw, tgw_id = False, None
     if not match:
         add("source route table", "fail",
-            f"no route to {dst_ip} in {src.get('route_table', {}).get('RouteTableId')}")
+            f"no route to {effective_dst} in {src.get('route_table', {}).get('RouteTableId')}")
     else:
         kind, tid = match["target"]
         add("source route table", "pass",
-            f"{dst_ip} routes via {kind} {tid} (match {match['cidr']})")
+            f"{effective_dst} routes via {kind} {tid} (match {match['cidr']})")
         via_tgw = kind == "tgw"
         if via_tgw:
             tgw_id = tid
 
-    # Resolve the TGW owner (hub) account from the TGW id, not the destination.
-    tgw_acct = None
-    if via_tgw:
-        tgw_acct = tgw_account_id or _tgw_owner(src_session, region, tgw_id) \
-            or dst_account_id or src_account_id
-
-    # 4 + 5. Transit Gateway route table and inspection detection.
+    # 4 + 5. Transit Gateway route table (source side) and inspection detection.
+    tgw_acct = (tgw_account_id or _tgw_owner(src_session, sreg, tgw_id)
+                or dst_account_id or src_account_id) if via_tgw else None
     inspection = None
     if via_tgw:
         try:
-            tgw_session = get_session(account_id=_norm(tgw_acct, me), region=region)
-            tgw = _tgw_assoc_and_lookup(tgw_session, region, src["vpc_id"], dst_ip)
+            tgw_session = get_session(account_id=_norm(tgw_acct, me), region=sreg)
+            tgw = _tgw_assoc_and_lookup(tgw_session, sreg, src["vpc_id"], effective_dst)
         except Exception as e:
             tgw = {"error": _assume_failure_note(tgw_acct, e)}
         if tgw.get("error"):
@@ -378,29 +464,37 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
             add("transit gateway route table", "fail",
                 f"TGW route table {tgw.get('route_table_id')} has "
                 + ("a blackhole route" if state == "blackhole" else "no route")
-                + f" for {dst_ip}")
+                + f" for {effective_dst}")
         else:
             m = tgw["match"]
             dst_vpc = dst_ctx["vpc_id"] if dst_ctx else None
             add("transit gateway route table", "pass",
-                f"TGW route table {tgw['route_table_id']} sends {dst_ip} to "
+                f"TGW route table {tgw['route_table_id']} sends {effective_dst} to "
                 f"{m.get('resource_type')} {m.get('resource_id')} (match {m.get('cidr')})")
             if m.get("resource_type") == "vpc" and dst_vpc and m.get("resource_id") != dst_vpc:
                 inspection = m.get("resource_id")
 
-    # 6. Destination SG + NACL ingress.
+    # Cross-region / cross-backbone leg that this walk cannot follow end to end.
+    if cross_region:
+        add("inter-region leg", "unknown",
+            f"source is in {sreg} and destination in {dreg}. This walk checks each side in its "
+            "own region but does not follow the inter-region Transit Gateway peering or Cloud WAN "
+            "core-network hop between them; confirm the segment or peering routes carry "
+            f"{effective_dst} from {sreg} to {dreg} and {effective_src} back")
+
+    # 6. Destination SG + NACL ingress (from the source address the destination sees).
     if dst_ctx:
-        ok, why = _sg_allows(dst_ctx["sg_inbound"], src_ip, port, protocol)
+        ok, why = _sg_allows(dst_ctx["sg_inbound"], effective_src, port, protocol)
         if ok is True:
             add("destination security group ingress", "pass",
-                f"ingress allows {proto_port(protocol, port)} from {src_ip} via {why}")
+                f"ingress allows {proto_port(protocol, port)} from {effective_src} via {why}")
         elif ok is None:
             add("destination security group ingress", "unknown",
                 f"ingress only references {why}; cross-account sources must be a CIDR")
         else:
             add("destination security group ingress", "fail",
-                f"no ingress rule allows {proto_port(protocol, port)} from {src_ip}")
-        ok, rule = _nacl_allows(dst_ctx.get("nacl"), False, src_ip, port, protocol)
+                f"no ingress rule allows {proto_port(protocol, port)} from {effective_src}")
+        ok, rule = _nacl_allows(dst_ctx.get("nacl"), False, effective_src, port, protocol)
         add("destination NACL ingress", "pass" if ok else "fail",
             f"{'allowed' if ok else 'denied'} by NACL {dst_ctx.get('nacl', {}).get('NetworkAclId')}"
             + (f" rule {rule}" if rule else ""))
@@ -408,40 +502,43 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         add("destination security group ingress", "unknown",
             "destination instance/account not provided, so its inbound rules were not checked")
 
-    # 7. Return path: TGW route back, and stateless NACL ephemeral return.
-    if dst_ctx and via_tgw:
-        try:
-            tgw_session = get_session(account_id=_norm(tgw_acct, me), region=region)
-            back = _tgw_assoc_and_lookup(tgw_session, region, dst_ctx["vpc_id"], src_ip)
-        except Exception as e:
-            back = {"error": _assume_failure_note(tgw_acct, e)}
-        if back.get("error"):
-            add("return path (TGW)", "unknown", back["error"])
-        elif not back.get("match") or back["match"].get("state") == "blackhole":
-            add("return path (TGW)", "fail",
-                f"destination's TGW route table {back.get('route_table_id')} has no return "
-                f"route to {src_ip} (asymmetric routing: traffic goes out but not back)")
-        else:
-            add("return path (TGW)", "pass",
-                f"return route to {src_ip} present via {back['match'].get('cidr')}")
+    # 7. Return path: destination-side TGW route back to the effective source, and NACLs.
     if dst_ctx:
-        ok, rule = _nacl_allows(dst_ctx.get("nacl"), True, src_ip, EPHEMERAL[0], protocol)
+        dmatch = _match_route(_vpc_routes(dst_ctx.get("route_table")), effective_src)
+        if dmatch and dmatch["target"][0] == "tgw":
+            back_tgw_id = dmatch["target"][1]
+            back_acct = (tgw_account_id or _tgw_owner(dst_session or src_session, dreg, back_tgw_id)
+                         or dst_account_id or src_account_id)
+            try:
+                back_session = get_session(account_id=_norm(back_acct, me), region=dreg)
+                back = _tgw_assoc_and_lookup(back_session, dreg, dst_ctx["vpc_id"], effective_src)
+            except Exception as e:
+                back = {"error": _assume_failure_note(back_acct, e)}
+            if back.get("error"):
+                add("return path (TGW)", "unknown", back["error"])
+            elif not back.get("match") or back["match"].get("state") == "blackhole":
+                add("return path (TGW)", "fail",
+                    f"destination's TGW route table {back.get('route_table_id')} has no return "
+                    f"route to {effective_src} (asymmetric routing: traffic goes out but not back)")
+            else:
+                add("return path (TGW)", "pass",
+                    f"return route to {effective_src} present via {back['match'].get('cidr')}")
+        ok, rule = _nacl_allows(dst_ctx.get("nacl"), True, effective_src, EPHEMERAL[0], protocol)
         if not ok:
             add("return path (NACL)", "fail",
-                f"destination NACL does not allow the ephemeral return to {src_ip}")
-        ok, rule = _nacl_allows(src.get("nacl"), False, dst_ip, EPHEMERAL[0], protocol)
+                f"destination NACL does not allow the ephemeral return to {effective_src}")
+        ok, rule = _nacl_allows(src.get("nacl"), False, effective_dst, EPHEMERAL[0], protocol)
         if not ok:
             add("return path (NACL)", "fail",
-                f"source NACL does not allow the ephemeral return from {dst_ip}")
+                f"source NACL does not allow the ephemeral return from {effective_dst}")
 
     # Firewall / inspection note.
     if inspection:
-        label = f"VPC {inspection}"
         add("inspection / firewall", "info",
-            f"traffic is routed through {label} (likely a firewall or inspection VPC) before "
-            f"reaching the destination. This tool does not read firewall rules: everything "
-            f"around it checks out, so if connectivity still fails, verify the firewall policy "
-            f"allows {proto_port(protocol, port)} from {src_ip} to {dst_ip}.")
+            f"traffic is routed through VPC {inspection} (likely a firewall or inspection VPC) "
+            "before reaching the destination. This tool does not read firewall rules: everything "
+            "around it checks out, so if connectivity still fails, verify the firewall policy "
+            f"allows {proto_port(protocol, port)} from {effective_src} to {effective_dst}.")
 
     fails = [f for f in findings if f["result"] == "fail"]
     unknowns = [f for f in findings if f["result"] == "unknown"]
@@ -452,7 +549,10 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
     else:
         verdict = "path looks open (config based; a live packet may still differ)"
 
-    return {"src_ip": src_ip, "dst": dst, "dst_ip": dst_ip, "port": port, "protocol": protocol,
+    return {"src_ip": src_ip, "dst": dst, "dst_ip": dst_ip,
+            "effective_src": effective_src, "effective_dst": effective_dst,
+            "src_region": sreg, "dst_region": dreg,
+            "port": port, "protocol": protocol,
             "findings": findings, "blocked": bool(fails), "verdict": verdict}
 
 
