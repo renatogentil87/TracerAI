@@ -78,6 +78,7 @@ Resources:
                   - 'ec2:DescribeVpcEndpoints'
                   - 'ec2:DescribeVpcPeeringConnections'
                   - 'ec2:DescribeManagedPrefixLists'
+                  - 'directconnect:Describe*'
                   - 'ec2:DescribeNatGateways'
                   - 'ec2:DescribeFlowLogs'
                   - 'ec2:DescribeAddresses'

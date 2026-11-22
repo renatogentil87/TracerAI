@@ -24,6 +24,8 @@ from tracerai.tools.cross_account import get_instance_security_groups as _get_in
 from tracerai.tools.cross_account import _account_names
 from tracerai.tools.reachability_trace import resolve_endpoint as _resolve_endpoint
 from tracerai.tools.reachability_trace import trace_cross_account as _trace_cross_account
+from tracerai.tools.directconnect import check_direct_connect as _check_direct_connect
+from tracerai.tools.directconnect import recommend_dx_resilience as _recommend_dx_resilience
 from tracerai.banner import print_banner
 
 console = Console()
@@ -289,6 +291,56 @@ def trace_cross_account(src_instance_id: str, dst: str, port: int, protocol: str
         src_region=src_region, dst_region=dst_region)
 
 
+@tool
+def check_direct_connect(connection_id: str = None, region: str = None,
+                         account_id: str = None) -> dict:
+    """Check Direct Connect health: connections, virtual interfaces, and BGP peers.
+
+    Use this when the user asks about Direct Connect, a DX connection, a virtual interface (VIF),
+    or BGP status over Direct Connect. It reports each connection (dedicated or hosted) and its
+    state and location, each VIF and its state, and each BGP peer with bgp_status up or down and
+    its address family, plus the prefixes the DX gateway advertises toward on-premises. Pass
+    connection_id to scope to one connection, and account_id/region for the account and region the
+    Direct Connect lives in (usually the networking account). For resilience or SLA questions use
+    recommend_dx_resilience instead.
+
+    Note the API does not return routes RECEIVED from on-premises; for those, read the attached VGW
+    or Transit Gateway route table with discover_network or get_vpc_route_tables.
+
+    Args:
+        connection_id: a DX connection id (dxcon-...) to scope to, or omit for all.
+        region: the region the Direct Connect is in.
+        account_id: the account that owns the Direct Connect (optional).
+
+    Returns connections, virtual_interfaces (with bgp_peers), dx_gateways (advertised_prefixes),
+    issues, and healthy.
+    """
+    return _check_direct_connect(connection_id=connection_id, region=region, account_id=account_id)
+
+
+@tool
+def recommend_dx_resilience(region: str = None, account_id: str = None) -> dict:
+    """Assess Direct Connect resilience and recommend how to reach 99.9% or 99.99% SLA.
+
+    Use this when the user asks whether their Direct Connect is resilient, or how to reach an SLA.
+    It reads the current connections and classifies the posture against the AWS Direct Connect
+    Resiliency Toolkit: High Resiliency (99.9%) needs two connections in two different DX locations;
+    Maximum Resiliency (99.99%) needs separate connections on distinct devices in more than one
+    location. When a location must be added, it suggests DX locations not already in use. Present
+    the verdict plainly, for example: "For 99.9% add a connection in a different DX location; for
+    99.99% diversify to two locations with redundant connections on distinct devices." Cite the
+    returned reference. Use check_direct_connect for health, not this.
+
+    Args:
+        region: the region the Direct Connect is in.
+        account_id: the account that owns the Direct Connect (optional).
+
+    Returns current (the posture, with meets_99_9 and meets_99_99), recommendations keyed by SLA,
+    suggested_additional_locations, and reference.
+    """
+    return _recommend_dx_resilience(region=region, account_id=account_id)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 You're expert in AWS Networking, with in depth knowledge in AWS VPC, Cloud WAN, Transit Gateway,
 Direct Connect, VPN, Interconnect, SDWAN,
@@ -474,6 +526,23 @@ Cross-account lookups:
 
 Only answer from tool results. If you are missing a name or port, ask.
 
+Direct Connect:
+- When the user asks about Direct Connect, a DX connection, a virtual interface
+  (VIF), or BGP over DX, call check_direct_connect (pass the region, and the
+  account if it is not this one). Summarize the connections (dedicated or hosted,
+  state, location), the VIFs and their state, and each BGP peer as up or down by
+  address family. Call out anything not available: a connection down, a VIF down,
+  or a BGP peer whose bgp_status is down (say whether the peer state is available,
+  which means configured but not established). For routes received from
+  on-premises, say the DX API does not expose them and read the attached VGW or
+  Transit Gateway route table instead.
+- When the user asks about DX resilience or an SLA, call recommend_dx_resilience.
+  State the current posture and the plain recommendation: for 99.9% add a
+  connection in a different DX location; for 99.99% diversify to two locations
+  with redundant connections on distinct devices. Name the suggested locations
+  and cite the reference the tool returns. Do not invent an SLA number; use the
+  tool's values.
+
 Grounding before you recommend a fix:
 - Never recommend a change (add a NAT gateway, add a route, open a security group
   rule) until you have inspected the actual configuration with the tools. When
@@ -545,7 +614,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )
