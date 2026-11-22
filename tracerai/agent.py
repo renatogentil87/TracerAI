@@ -26,6 +26,7 @@ from tracerai.tools.reachability_trace import resolve_endpoint as _resolve_endpo
 from tracerai.tools.reachability_trace import trace_cross_account as _trace_cross_account
 from tracerai.tools.directconnect import check_direct_connect as _check_direct_connect
 from tracerai.tools.directconnect import recommend_dx_resilience as _recommend_dx_resilience
+from tracerai.tools.flow_logs import check_vpc_flow_logs as _check_vpc_flow_logs
 from tracerai.banner import print_banner
 
 console = Console()
@@ -341,6 +342,33 @@ def recommend_dx_resilience(region: str = None, account_id: str = None) -> dict:
     return _recommend_dx_resilience(region=region, account_id=account_id)
 
 
+@tool
+def check_vpc_flow_logs(target: str, region: str = None, account_id: str = None,
+                        action: str = "REJECT", minutes: int = 60, port: int = None) -> dict:
+    """Read VPC flow log records for an interface to see ACCEPT or REJECT traffic.
+
+    Use this for evidence of whether traffic actually reached an interface and was accepted or
+    rejected, next to the config the other tools read (for example after a trace says a security
+    group should block something, confirm it with REJECT records). This reads VPC flow logs (not
+    Cloud WAN flow logs) and only when they are delivered to CloudWatch Logs; if they go to S3 it
+    says so. It resolves target to its ENI(s) and queries CloudWatch Logs Insights.
+
+    Args:
+        target: an instance id, an ENI id, or a private IP.
+        region: the region the interface is in.
+        account_id: the account that owns it (optional; uses the read-only role).
+        action: "REJECT" (default), "ACCEPT", or "ALL".
+        minutes: how far back to look (default 60).
+        port: optional destination port to filter (for example 443).
+
+    Returns the matched records (timestamp, src/dst, port, protocol, action), match_count, the
+    log group and traffic_type, and notes (for example if the flow log captures ACCEPT only, or
+    is not delivered to CloudWatch Logs).
+    """
+    return _check_vpc_flow_logs(target=target, region=region, account_id=account_id,
+                                action=action, minutes=minutes, port=port)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 You're expert in AWS Networking, with in depth knowledge in AWS VPC, Cloud WAN, Transit Gateway,
 Direct Connect, VPN, Interconnect, SDWAN,
@@ -543,6 +571,19 @@ Direct Connect:
   and cite the reference the tool returns. Do not invent an SLA number; use the
   tool's values.
 
+VPC flow logs:
+- When the user asks whether traffic is being accepted or rejected, or wants
+  evidence that traffic reached an interface, call check_vpc_flow_logs with the
+  instance, ENI, or IP and the region. Default to action REJECT when they ask why
+  something is blocked; use ACCEPT or ALL when they ask what is getting through.
+  This reads VPC flow logs only, and only when they go to CloudWatch Logs.
+- Use it to confirm a config finding with evidence: when a trace or security group
+  check says traffic should be blocked, the matching REJECT records prove it is.
+- Relay the tool's notes plainly: if the flow log captures ACCEPT only there will
+  be no REJECT records, and if it is not delivered to CloudWatch Logs say the tool
+  cannot read it (S3 needs Athena). Do not treat an empty result as proof traffic
+  is fine unless the flow log actually captures the action asked about.
+
 Grounding before you recommend a fix:
 - Never recommend a change (add a NAT gateway, add a route, open a security group
   rule) until you have inspected the actual configuration with the tools. When
@@ -614,7 +655,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )

@@ -162,6 +162,11 @@ The agent has these tools and decides which to call from your question.
 - `recommend_dx_resilience` assesses the resilience posture and recommends how to
   reach the 99.9% or 99.99% SLA, following the AWS Direct Connect Resiliency Toolkit.
 
+**Evidence**
+- `check_vpc_flow_logs` reads VPC flow log records for an interface from CloudWatch
+  Logs and shows the ACCEPT or REJECT traffic, so you can confirm with evidence what
+  the config trace predicts. CloudWatch Logs destinations only.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -174,6 +179,7 @@ The agent has these tools and decides which to call from your question.
 | `tracerai/tools/cross_account.py` | Cross-account network discovery (TGW + Cloud WAN, per-VPC detail) |
 | `tracerai/tools/reachability_trace.py` | Cross-account reachability tracing (endpoint resolution + path walk) |
 | `tracerai/tools/directconnect.py` | Direct Connect health and resilience recommendations |
+| `tracerai/tools/flow_logs.py` | VPC flow log reader (CloudWatch Logs): ACCEPT/REJECT for an interface |
 | `tracerai/banner.py` | Startup banner |
 | `deploy/` | CloudFormation template + runbook for the cross-account read-only role |
 | `requirements.txt` | Dependencies |
