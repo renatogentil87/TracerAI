@@ -126,6 +126,42 @@ python tracerai/tools/instances.py
 python tracerai/tools/security_groups.py
 ```
 
+## Tools
+
+The agent has these tools and decides which to call from your question.
+
+**Discovery and mapping**
+- `discover_network` maps Transit Gateway and Cloud WAN across accounts: per VPC it
+  reads CIDRs, subnets, route tables, security groups, NACLs, NAT gateways and flow
+  logs, plus each attachment's 1:1 NAT state. Pass one region, or several comma
+  separated (for example `eu-west-1,us-east-1`) for a cross-region map.
+- `get_vpc_route_tables` reads one VPC's route tables, in this or another account.
+- `list_instances` lists the instances in a region.
+- `resolve_instance` resolves a Name tag to an instance id in this account.
+
+**Reachability**
+- `check_reachability` runs EC2 Reachability Analyzer between two instances in the
+  same account.
+- `trace_cross_account` walks the path between two instances in different accounts
+  and regions: security groups, NACLs, route tables, the Transit Gateway route table
+  in the hub account, and the return path. It is 1:1 NAT aware and names the first
+  layer that blocks the flow.
+- `resolve_endpoint` turns a Name tag, instance id, private IP or ARN into an
+  instance (in any account) so you can confirm the ends before a cross-account trace.
+
+**Security groups and ports**
+- `check_security_group` inspects the inbound and outbound rules of an instance or a
+  security group, with a verdict for a given port.
+- `scan_open_port` scans every security group in a region for an open inbound port.
+- `get_instance_security_groups` reads an instance's security group rules, in this or
+  another account.
+
+**Direct Connect**
+- `check_direct_connect` reports connections (dedicated or hosted), virtual
+  interfaces, and each BGP peer up or down, plus the DX gateway's advertised prefixes.
+- `recommend_dx_resilience` assesses the resilience posture and recommends how to
+  reach the 99.9% or 99.99% SLA, following the AWS Direct Connect Resiliency Toolkit.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -137,6 +173,7 @@ python tracerai/tools/security_groups.py
 | `tracerai/tools/security_groups.py` | Inspect security group rules |
 | `tracerai/tools/cross_account.py` | Cross-account network discovery (TGW + Cloud WAN, per-VPC detail) |
 | `tracerai/tools/reachability_trace.py` | Cross-account reachability tracing (endpoint resolution + path walk) |
+| `tracerai/tools/directconnect.py` | Direct Connect health and resilience recommendations |
 | `tracerai/banner.py` | Startup banner |
 | `deploy/` | CloudFormation template + runbook for the cross-account read-only role |
 | `requirements.txt` | Dependencies |
