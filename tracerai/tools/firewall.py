@@ -38,10 +38,17 @@ def _ip_in(ip, cidr):
         return False
 
 
-def _addr_match(ip, token):
-    """A Network Firewall / Suricata address token: 'any', a CIDR, or an IP."""
+def _addr_match(ip, token, ipsets=None):
+    """A Network Firewall / Suricata address token: 'any', a CIDR, an IP, or a
+    Suricata variable like $HOME_NET resolved from the rule group's IP sets."""
     if not token or token.lower() == "any":
         return True
+    if token.startswith("$"):
+        name = token[1:]
+        defs = (ipsets or {}).get(name)
+        if defs is None:
+            return False  # undefined variable; caller notes it
+        return any(_addr_match(ip, c) for c in defs)
     token = token.strip("[]")
     for part in token.split(","):
         part = part.strip()
@@ -54,10 +61,15 @@ def _addr_match(ip, token):
     return False
 
 
-def _port_match(port, token):
-    """A port token: 'any', 'N', or a Suricata range 'N:M' (open ends allowed)."""
+def _port_match(port, token, portsets=None):
+    """A port token: 'any', 'N', a range 'N:M', or a Suricata variable."""
     if port is None or not token or token.lower() == "any":
         return True
+    if token.startswith("$"):
+        defs = (portsets or {}).get(token[1:])
+        if defs is None:
+            return False
+        return any(_port_match(port, p) for p in defs)
     token = token.strip("[]")
     for part in token.split(","):
         part = part.strip()
@@ -117,18 +129,39 @@ def _parse_suricata(line):
             "destination_port": parts[6], "raw": line}
 
 
-def _match_stateful_header(h, src, dst, port, proto):
+def _match_stateful_header(h, src, dst, port, proto, ipsets=None, portsets=None):
     """Does a structured or parsed-Suricata header match the flow (forward)?"""
     if not _proto_match(proto, h.get("Protocol") or h.get("protocol", "")):
         return False
     s = h.get("Source") or h.get("source", "any")
     d = h.get("Destination") or h.get("destination", "any")
     dp = h.get("DestinationPort") or h.get("destination_port", "any")
-    if not _addr_match(src, s) or not _addr_match(dst, d):
+    if not _addr_match(src, s, ipsets) or not _addr_match(dst, d, ipsets):
         return False
-    if not _port_match(port, dp):
+    if not _port_match(port, dp, portsets):
         return False
     return True
+
+
+def _rule_variables(rg):
+    """Extract IP-set and port-set variable maps from a rule group's
+    RuleVariables so Suricata-style $HOME_NET tokens can be resolved."""
+    rv = rg.get("RuleVariables") or {}
+    ipsets = {k: v.get("Definition", []) for k, v in (rv.get("IPSets") or {}).items()}
+    portsets = {k: v.get("Definition", []) for k, v in (rv.get("PortSets") or {}).items()}
+    return ipsets, portsets
+
+
+def _unresolved_vars(header, ipsets, portsets):
+    """Return the $variables referenced by a header that are not defined in the
+    rule group's variable sets, so the caller can flag an incomplete evaluation."""
+    missing = []
+    for key, sets in (("source", ipsets), ("destination", ipsets),
+                      ("source_port", portsets), ("destination_port", portsets)):
+        tok = header.get(key, "")
+        if isinstance(tok, str) and tok.startswith("$") and tok[1:] not in (sets or {}):
+            missing.append(tok)
+    return missing
 
 
 def check_firewall_rules(src_ip: str, dst_ip: str, port: int, protocol: str = "tcp",
@@ -196,20 +229,42 @@ def check_firewall_rules(src_ip: str, dst_ip: str, port: int, protocol: str = "t
     if verdict is None and to_stateful:
         matches = []  # (action, source, detail)
         for ref in policy.get("StatefulRuleGroupReferences", []):
-            rg = nf.describe_rule_group(RuleGroupArn=ref["ResourceArn"])["RuleGroup"]
+            arn = ref["ResourceArn"]
+            name = arn.split("/")[-1]
+            if ":aws-managed:" in arn:
+                notes.append(f"managed rule group {name} (AWS-maintained threat signatures) "
+                             "was not evaluated; its contents are not readable via DescribeRuleGroup")
+                continue
+            try:
+                rg = nf.describe_rule_group(RuleGroupArn=arn)["RuleGroup"]
+            except Exception as e:
+                if "Managed rule groups" in str(e) or "InvalidRequest" in type(e).__name__:
+                    notes.append(f"managed rule group {name} (AWS-maintained threat signatures) "
+                                 "was not evaluated; its contents are not readable via DescribeRuleGroup")
+                    continue
+                raise
+            ipsets, portsets = _rule_variables(rg)
             src = rg["RulesSource"]
-            name = ref["ResourceArn"].split("/")[-1]
             if src.get("StatefulRules"):
                 for r in src["StatefulRules"]:
-                    if _match_stateful_header(r["Header"], src_ip, dst_ip, port, protocol):
+                    if _match_stateful_header(r["Header"], src_ip, dst_ip, port, protocol, ipsets, portsets):
                         matches.append((r["Action"].lower(), name, dict(r["Header"])))
             elif src.get("RulesString"):
                 for line in src["RulesString"].splitlines():
                     p = _parse_suricata(line)
-                    if p and _match_stateful_header(p, src_ip, dst_ip, port, protocol):
+                    if not p:
+                        continue
+                    missing = _unresolved_vars(p, ipsets, portsets)
+                    if _match_stateful_header(p, src_ip, dst_ip, port, protocol, ipsets, portsets):
                         matches.append((p["action"], name, {"suricata": p["raw"]}))
-                        notes.append(f"Suricata rule in {name} matched on header only; its options "
-                                     "(flow, content, etc.) were not evaluated")
+                        note = (f"Suricata rule in {name} matched on header only; its options "
+                                "(flow, content, etc.) were not evaluated")
+                        if missing:
+                            note += f"; unresolved variables {missing} were treated as non-matching"
+                        notes.append(note)
+                    elif missing:
+                        notes.append(f"Suricata rule in {name} references unresolved variables "
+                                     f"{missing}; it could not be evaluated for this flow")
             elif src.get("RulesSourceList"):
                 rsl = src["RulesSourceList"]
                 notes.append(f"{name} is a domain {rsl.get('GeneratedRulesType')} "
