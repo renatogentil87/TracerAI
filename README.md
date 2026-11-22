@@ -175,6 +175,14 @@ The agent has these tools and decides which to call from your question.
   Logs and shows the ACCEPT or REJECT traffic, so you can confirm with evidence what
   the config trace predicts. CloudWatch Logs destinations only.
 
+**Firewall**
+- `check_firewall_rules` evaluates an AWS Network Firewall policy for a flow (source,
+  destination, port, protocol) and says whether it is allowed or blocked, naming the
+  rule. This is the inspection step a trace defers to you. It evaluates stateless
+  rules, structured stateful rules and the default actions precisely; raw Suricata
+  rules are matched on the header only (and it says so), and domain lists are named,
+  not matched to an IP.
+
 ## Repository layout
 
 | Path | Purpose |
@@ -188,6 +196,7 @@ The agent has these tools and decides which to call from your question.
 | `tracerai/tools/reachability_trace.py` | Cross-account reachability tracing (endpoint resolution + path walk) |
 | `tracerai/tools/directconnect.py` | Direct Connect health and resilience recommendations |
 | `tracerai/tools/flow_logs.py` | VPC flow log reader (CloudWatch Logs): ACCEPT/REJECT for an interface |
+| `tracerai/tools/firewall.py` | AWS Network Firewall rule evaluation (allow/block a flow) |
 | `tracerai/banner.py` | Startup banner |
 | `deploy/` | CloudFormation template + runbook for the cross-account read-only role |
 | `requirements.txt` | Dependencies |

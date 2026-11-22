@@ -27,6 +27,7 @@ from tracerai.tools.reachability_trace import trace_cross_account as _trace_cros
 from tracerai.tools.directconnect import check_direct_connect as _check_direct_connect
 from tracerai.tools.directconnect import recommend_dx_resilience as _recommend_dx_resilience
 from tracerai.tools.flow_logs import check_vpc_flow_logs as _check_vpc_flow_logs
+from tracerai.tools.firewall import check_firewall_rules as _check_firewall_rules
 from tracerai.banner import print_banner
 
 console = Console()
@@ -369,6 +370,41 @@ def check_vpc_flow_logs(target: str, region: str = None, account_id: str = None,
                                 action=action, minutes=minutes, port=port)
 
 
+@tool
+def check_firewall_rules(src_ip: str, dst_ip: str, port: int, protocol: str = "tcp",
+                         region: str = None, account_id: str = None,
+                         firewall_name: str = None, firewall_arn: str = None) -> dict:
+    """Check whether an AWS Network Firewall allows a flow (the inspection step a trace defers).
+
+    Use this when traffic goes through an inspection VPC / AWS Network Firewall and the user asks
+    whether the firewall allows a flow, or when a trace flagged an inspection VPC and you need to
+    confirm the firewall side. Give the source and destination IPs (use the NAT-translated address
+    if the path is NAT'd), the port and protocol, and the region and account the firewall is in.
+
+    It reads the firewall policy and rule groups and reports a verdict (allowed / blocked), naming
+    the rule and action. It evaluates stateless rules, structured stateful rules and the default
+    actions precisely; for raw Suricata rule strings it matches the rule header only and says so;
+    domain allow/deny lists are named, not matched to an IP. If several firewalls exist it returns
+    the list so you can pass firewall_name.
+
+    Args:
+        src_ip: source IP of the flow (the address as it reaches the firewall).
+        dst_ip: destination IP.
+        port: destination port.
+        protocol: "tcp" (default), "udp", or "icmp".
+        region: the region the firewall is in.
+        account_id: the account that owns the firewall (optional).
+        firewall_name: the firewall to use when there is more than one.
+        firewall_arn: the firewall arn, as an alternative to the name.
+
+    Returns verdict, matched (the rule and action), rule_order, the stateless/stateful defaults,
+    and notes for anything not fully evaluable (Suricata options, domain lists).
+    """
+    return _check_firewall_rules(src_ip=src_ip, dst_ip=dst_ip, port=port, protocol=protocol,
+                                 region=region, account_id=account_id,
+                                 firewall_name=firewall_name, firewall_arn=firewall_arn)
+
+
 SYSTEM_PROMPT = """You are TracerAI, an AWS network troubleshooting assistant.
 You're expert in AWS Networking, with in depth knowledge in AWS VPC, Cloud WAN, Transit Gateway,
 Direct Connect, VPN, Interconnect, SDWAN,
@@ -584,6 +620,22 @@ VPC flow logs:
   cannot read it (S3 needs Athena). Do not treat an empty result as proof traffic
   is fine unless the flow log actually captures the action asked about.
 
+Network Firewall:
+- When a trace or discovery shows traffic routed through an inspection VPC, or the
+  user asks whether the firewall allows a flow, call check_firewall_rules with the
+  source and destination IPs, port and protocol, and the firewall's region and
+  account. If the path is NAT'd, use the translated (outside) addresses, since
+  that is what reaches the firewall.
+- Give the verdict plainly: allowed or blocked, naming the rule and action and the
+  default actions. This closes the loop the trace leaves open: if everything else
+  in the trace is fine and the firewall blocks it, the firewall is the cause; if
+  the firewall allows it too, the path is clear.
+- Relay the tool's notes honestly: for a raw Suricata rule it matched the header
+  only (options like flow or content were not evaluated), and domain allow/deny
+  lists are named but not matched to an IP. Do not claim a definitive allow when
+  the deciding rule is Suricata with unevaluated options; say what was and was not
+  checked.
+
 Grounding before you recommend a fix:
 - Never recommend a change (add a NAT gateway, add a route, open a security group
   rule) until you have inspected the actual configuration with the tools. When
@@ -655,7 +707,7 @@ def build_agent() -> Agent:
     model = BedrockModel(**model_kwargs)
     return Agent(
         model=model,
-        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs],
+        tools=[resolve_instance, check_reachability, check_security_group, list_instances, scan_open_port, discover_network, get_vpc_route_tables, get_instance_security_groups, resolve_endpoint, trace_cross_account, check_direct_connect, recommend_dx_resilience, check_vpc_flow_logs, check_firewall_rules],
         system_prompt=system_prompt,
         callback_handler=ToolTraceHandler(),
     )

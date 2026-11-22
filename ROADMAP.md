@@ -17,15 +17,12 @@ permissions.
   account.
 - Direct Connect health (connections, VIFs, BGP peers) and a resilience
   recommendation against the AWS Direct Connect Resiliency Toolkit.
+- Network Firewall rule evaluation: given a flow, read the policy and rule groups
+  and say whether it is allowed or blocked (stateless and structured stateful
+  rules precisely; raw Suricata matched on the header; domain lists named).
+- VPC flow log reader (CloudWatch Logs) for ACCEPT/REJECT evidence on an interface.
 
 ## Next up
-
-**Network Firewall rule verification.** The trace already detects when traffic is
-routed through an inspection VPC and tells me to check the firewall by hand. The
-next step is to read the AWS Network Firewall policy and rule groups (stateless and
-stateful, including Suricata rules) and say whether a specific flow (source,
-destination, port, protocol) is allowed or dropped. That closes the one layer the
-end-to-end trace still hands off to me.
 
 **Route 53 and DNS.** Resolve a name the way the workload would, then trace the IP
 it returns. Read private hosted zones and their records, split-horizon overlaps,
