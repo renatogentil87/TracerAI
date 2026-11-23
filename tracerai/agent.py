@@ -4,6 +4,7 @@
 """
 
 import os
+import sys
 
 import boto3
 
@@ -853,36 +854,48 @@ def print_context():
               "read fine.\n")
 
 
+_PROMPT_SESSION = None
+
+
 def _read_question() -> str:
-    """Read a possibly multi-line question from stdin.
+    """Read a question from stdin. Enter submits; a pasted block stays intact.
 
     input() reads a single line, so a pasted multi-paragraph prompt used to be
     split: only the first line became the question and the blank line between
-    paragraphs hit the old 'quit on empty line' branch and exited the agent.
+    paragraphs exited the agent. This uses prompt_toolkit, which supports
+    bracketed paste: a pasted multi-line block (newlines and all) is inserted as
+    text, and a single Enter submits the whole thing. No sentinel to type.
 
-    This reads lines until a sentinel line containing only '.' or '/send',
-    keeping blank lines inside the block. Paste the whole prompt, then type a
-    line with just '.' to send it. 'quit' or 'exit' on its own (before any other
-    text) exits, as does Ctrl-D on an empty prompt. Returns the joined text, an
-    empty string for an empty submit (caller just re-prompts), or None to exit.
+    'quit' or 'exit' on its own submits an exit, as do Ctrl-D and Ctrl-C.
+    Returns the text, an empty string for an empty submit (caller re-prompts),
+    or None to exit. Falls back to a plain single-line read when prompt_toolkit
+    or a real terminal is not available (for example piped input).
     """
-    print("\nTracerAI (paste your prompt, then a line with just '.' to send; "
-          "'quit' to exit):")
-    lines = []
-    while True:
+    global _PROMPT_SESSION
+    prompt_text = "\nTracerAI (paste your prompt, then press Enter to send; 'quit' to exit):\n"
+
+    if sys.stdin.isatty():
         try:
-            line = input()
-        except EOFError:  # Ctrl-D: send what we have, or exit if nothing yet
-            if lines:
-                break
+            from prompt_toolkit import PromptSession
+            if _PROMPT_SESSION is None:
+                # multiline=False: Enter accepts; bracketed paste inserts newlines
+                # without accepting, so a pasted block is captured whole.
+                _PROMPT_SESSION = PromptSession()
+            text = _PROMPT_SESSION.prompt(prompt_text)
+        except (EOFError, KeyboardInterrupt):
             return None
-        stripped = line.strip()
-        if not lines and stripped.lower() in ("quit", "exit"):
-            return None
-        if stripped in (".", "/send"):
-            break
-        lines.append(line)
-    return "\n".join(lines).strip()
+        except Exception:
+            text = None  # fall through to the plain reader below
+        if text is not None:
+            text = text.strip()
+            return None if text.lower() in ("quit", "exit") else text
+
+    # Fallback: plain single-line read (non-tty or prompt_toolkit unavailable).
+    try:
+        text = input(prompt_text).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return None if text.lower() in ("quit", "exit") else text
 
 
 if __name__ == "__main__":
