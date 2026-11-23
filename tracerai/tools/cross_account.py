@@ -123,6 +123,20 @@ def _mask(account_id: str) -> str:
     return "..." + account_id[-4:] if account_id and len(account_id) >= 4 else account_id
 
 
+def _norm(account_id: str):
+    """Normalize a target account for get_session: return None when account_id is
+    empty or is the caller's own account, so the session uses local credentials
+    instead of trying to assume the read-only role into the account TracerAI runs
+    in (which has no such role and would fail with a misleading AccessDenied)."""
+    if not account_id:
+        return None
+    try:
+        me = boto3.client("sts").get_caller_identity()["Account"]
+    except Exception:
+        return account_id
+    return None if account_id == me else account_id
+
+
 def resolve_account(name_or_id: str) -> dict:
     """Resolve an account name (or partial name) to its 12-digit id, so the user
     never has to type the account number.
@@ -760,7 +774,7 @@ def get_vpc_route_tables(vpc_id: str, account_id: str = None, region: str = None
         region: the region the VPC is in.
     """
     try:
-        session = get_session(account_id=account_id, region=region)
+        session = get_session(account_id=_norm(account_id), region=region)
     except Exception as e:
         return {"account_id": account_id, "vpc_id": vpc_id,
                 "error": _assume_failure_note(account_id, e)}
@@ -778,7 +792,7 @@ def get_instance_security_groups(instance_id: str, account_id: str = None, regio
         region: the region the instance is in.
     """
     try:
-        session = get_session(account_id=account_id, region=region)
+        session = get_session(account_id=_norm(account_id), region=region)
     except Exception as e:
         return {"account_id": account_id, "instance_id": instance_id,
                 "error": _assume_failure_note(account_id, e)}
