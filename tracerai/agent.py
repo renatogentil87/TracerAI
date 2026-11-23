@@ -853,17 +853,51 @@ def print_context():
               "read fine.\n")
 
 
+def _read_question() -> str:
+    """Read a possibly multi-line question from stdin.
+
+    input() reads a single line, so a pasted multi-paragraph prompt used to be
+    split: only the first line became the question and the blank line between
+    paragraphs hit the old 'quit on empty line' branch and exited the agent.
+
+    This reads lines until a sentinel line containing only '.' or '/send',
+    keeping blank lines inside the block. Paste the whole prompt, then type a
+    line with just '.' to send it. 'quit' or 'exit' on its own (before any other
+    text) exits, as does Ctrl-D on an empty prompt. Returns the joined text, an
+    empty string for an empty submit (caller just re-prompts), or None to exit.
+    """
+    print("\nTracerAI (paste your prompt, then a line with just '.' to send; "
+          "'quit' to exit):")
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:  # Ctrl-D: send what we have, or exit if nothing yet
+            if lines:
+                break
+            return None
+        stripped = line.strip()
+        if not lines and stripped.lower() in ("quit", "exit"):
+            return None
+        if stripped in (".", "/send"):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 if __name__ == "__main__":
     agent = build_agent()
     print_banner()
     print_context()
     while True:
         try:
-            question = input("\nTracerAI:\n").strip()
-        except (EOFError, KeyboardInterrupt):
+            question = _read_question()
+        except KeyboardInterrupt:  # Ctrl-C exits cleanly
             break
-        if not question or question.lower() in ("quit", "exit"):
+        if question is None:
             break
+        if not question:  # empty submit: re-prompt instead of quitting
+            continue
         try:
             with console.status("[dim]working...[/dim]", spinner="dots"):
                 result = agent(question)
